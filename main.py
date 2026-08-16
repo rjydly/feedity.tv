@@ -7,7 +7,8 @@ import cv2
 import numpy as np
 import ollama
 from PIL import Image, ImageDraw, ImageFont
-from moviepy.editor import VideoFileClip, CompositeVideoClip, ImageClip
+from moviepy import VideoFileClip, CompositeVideoClip, ImageClip
+
 
 # ==========================================
 # CONFIGURACIÓ I VARIABLES D'ENTORN
