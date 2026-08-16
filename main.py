@@ -62,23 +62,25 @@ def analyze_caption_with_local_ai(caption):
     
     return "Unknown", "", caption
 
+from apify_client import ApifyClient
+
 def get_most_viral_video_from_account(account_handle):
     processed_ids = load_processed_ids()
     clean_handle = account_handle.replace("@", "").strip()
     
-    print(f"📡 Scraping de @{clean_handle} via Apify (instagram-post-scraper)...")
+    print(f"📡 Scraping de Reels de @{clean_handle} via Apify...")
     
     client = ApifyClient(APIFY_TOKEN)
     
-    # Paràmetres per a l'Actor apify/instagram-post-scraper
+    # Paràmetres d'entrada per a l'actor apify/instagram-reel-scraper
     run_input = {
         "username": [clean_handle],
-        "resultsLimit": 15,
-        "skipPinnedPosts": True
+        "resultsLimit": 15
     }
     
     try:
-        run = client.actor("apify/instagram-post-scraper").call(run_input=run_input)
+        # Cridem a l'actor apify/instagram-reel-scraper
+        run = client.actor("apify/instagram-reel-scraper").call(run_input=run_input)
         dataset_items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
     except Exception as e:
         print(f"❌ Error en executar l'Actor d'Apify: {e}")
@@ -86,27 +88,25 @@ def get_most_viral_video_from_account(account_handle):
 
     candidates = []
     for item in dataset_items:
-        # Trobar URL del vídeo MP4
-        video_url = item.get("videoUrl") or item.get("displayUrl")
-        if not item.get("isVideo") and not item.get("videoUrl"):
+        video_url = item.get("videoUrl") or item.get("video_url")
+        if not video_url:
             continue
             
-        video_id = str(item.get("id") or item.get("shortCode"))
+        video_id = str(item.get("id") or item.get("shortCode") or item.get("code"))
         if video_id in processed_ids:
             continue
             
-        views = item.get("videoViewCount") or item.get("likesCount") or 0
-        caption_text = item.get("caption") or ""
+        views = item.get("playCount") or item.get("videoViewCount") or item.get("likeCount") or 0
+        caption_text = item.get("caption") or item.get("text") or ""
         
-        if video_url:
-            candidates.append({
-                "id": video_id,
-                "url": video_url,
-                "views": views,
-                "caption": caption_text
-            })
+        candidates.append({
+            "id": video_id,
+            "url": video_url,
+            "views": views,
+            "caption": caption_text
+        })
         
-    print(f"📊 Troba {len(candidates)} vídeos no processats.")
+    print(f"📊 S'han trobat {len(candidates)} Reels potencials no processats.")
     candidates.sort(key=lambda x: x["views"], reverse=True)
     
     for item in candidates:
@@ -129,6 +129,7 @@ def get_most_viral_video_from_account(account_handle):
         
     return None, None, None, None, None
 
+    
 def crop_content_bounding_box(video_path):
     cap = cv2.VideoCapture(video_path)
     ret, frame = cap.read()
