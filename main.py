@@ -65,17 +65,18 @@ def analyze_caption_with_local_ai(caption):
 def get_most_viral_video_from_account(account_handle):
     processed_ids = load_processed_ids()
     clean_handle = account_handle.replace("@", "").strip()
+    profile_url = f"https://www.instagram.com/{clean_handle}/"
     
     print(f"📡 Scraping de @{clean_handle} via Apify...")
     
     client = ApifyClient(APIFY_TOKEN)
     
-    # Paràmetres oficials recomanats per a apify/instagram-scraper
+    # Esquema d'entrada oficial d'apify/instagram-scraper
     run_input = {
-        "usernames": [clean_handle],
+        "directUrls": [profile_url],
         "resultsType": "posts",
-        "resultsLimit": 20,
-        "addParentData": False
+        "searchType": "user",
+        "resultsLimit": 20
     }
     
     try:
@@ -87,7 +88,7 @@ def get_most_viral_video_from_account(account_handle):
 
     candidates = []
     for item in dataset_items:
-        # Acceptem qualsevol ítem que porti URL de vídeo directa
+        # Extraure URL del vídeo
         video_url = item.get("videoUrl")
         if not video_url:
             continue
@@ -106,7 +107,7 @@ def get_most_viral_video_from_account(account_handle):
             "caption": caption_text
         })
         
-    print(f"📊 Troba {len(candidates)} vídeos potencials no processats.")
+    print(f"📊 S'han trobat {len(candidates)} vídeos potencials no processats.")
     candidates.sort(key=lambda x: x["views"], reverse=True)
     
     for item in candidates:
