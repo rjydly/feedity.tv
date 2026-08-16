@@ -8,11 +8,11 @@ import ollama
 from apify_client import ApifyClient
 from moviepy import VideoFileClip, CompositeVideoClip
 
-# Configurar variables des del workflow
+# Configurar variables des de les variables d'entorn
 APIFY_TOKEN = os.getenv("APIFY_TOKEN")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-TEST_MODE = False
+TEST_MODE = False  # Canviar a True si només vols fer proves sense desar l'historial
 
 def load_processed_ids():
     if os.path.exists("processed_videos.json"):
@@ -66,7 +66,6 @@ def get_most_viral_video_from_account(account_handle):
     
     client = ApifyClient(APIFY_TOKEN)
     
-    # Paràmetres per a l'Actor oficial d'Instagram de Apify
     run_input = {
         "directUrls": [f"https://www.instagram.com/{clean_handle}/"],
         "resultsType": "posts",
@@ -75,7 +74,6 @@ def get_most_viral_video_from_account(account_handle):
     }
     
     try:
-        # Executa l'actor de scraping d'Instagram
         run = client.actor("apify/instagram-scraper").call(run_input=run_input)
         dataset_items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
     except Exception as e:
@@ -84,7 +82,6 @@ def get_most_viral_video_from_account(account_handle):
 
     candidates = []
     for item in dataset_items:
-        # Filtrem només els vídeos / Reels
         if item.get("type") != "Video" and not item.get("isVideo", False):
             continue
             
@@ -104,7 +101,6 @@ def get_most_viral_video_from_account(account_handle):
                 "caption": caption_text
             })
         
-    # Ordenem pel més viral
     candidates.sort(key=lambda x: x["views"], reverse=True)
     
     for item in candidates:
@@ -127,20 +123,46 @@ def get_most_viral_video_from_account(account_handle):
         
     return None, None, None, None
 
-def process_video_canvas(input_path, output_path="output.mp4"):
-    clip = VideoFileClip(input_path)
-    w, h = clip.size
+def crop_content_bounding_box(video_path):
+    """Detecta la regió del vídeo real ignorant els marcs negres i textos adjunts."""
+    cap = cv2.VideoCapture(video_path)
+    ret, frame = cap.read()
+    cap.release()
     
-    if h > w:
-        print("📐 El vídeo ja és vertical. Ajustant a 1080x1920...")
-        final_clip = clip.resized(height=1920) if clip.h != 1920 else clip
+    if not ret:
+        return None
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray, 15, 255, cv2.THRESH_BINARY)
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    if contours:
+        c = max(contours, key=cv2.contourArea)
+        x, y, w, h = cv2.boundingRect(c)
+        return (x, y, w, h)
+    return None
+
+def process_video_canvas(input_path, output_path="final_feedity.mp4"):
+    clip = VideoFileClip(input_path)
+    bbox = crop_content_bounding_box(input_path)
+    
+    if bbox and bbox[2] > 100 and bbox[3] > 100:
+        x, y, w, h = bbox
+        print(f"✂️ Crop Bounding Box aplicat: x={x}, y={y}, w={w}, h={h}")
+        cropped_clip = clip.cropped(x1=x, y1=y, x2=x+w, y2=y+h)
     else:
-        print("📐 Convertint vídeo horitzontal a canvas 9:16...")
-        scaled_clip = clip.resized(width=1080)
-        final_clip = CompositeVideoClip([scaled_clip.with_position("center")], size=(1080, 1920))
+        cropped_clip = clip
+
+    scaled_clip = cropped_clip.resized(width=1080)
+    
+    final_clip = CompositeVideoClip(
+        [scaled_clip.with_position("center")],
+        size=(1080, 1920)
+    )
     
     final_clip.write_videofile(output_path, codec="libx264", audio_codec="aac")
     clip.close()
+    cropped_clip.close()
     final_clip.close()
 
 def send_telegram_notification(video_path, caption):
