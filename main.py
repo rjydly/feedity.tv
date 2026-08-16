@@ -2,23 +2,16 @@ import os
 import re
 import json
 import requests
-import feedparser
-from bs4 import BeautifulSoup
 import numpy as np
 import cv2
 import ollama
+from apify_client import ApifyClient
 from moviepy import VideoFileClip, CompositeVideoClip
 
+APIFY_TOKEN = os.getenv("APIFY_TOKEN")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 TEST_MODE = False
-
-# Instàncies de RSSHub per provar si la principal falla
-RSSHUB_INSTANCES = [
-    "https://rsshub.app",
-    "https://rsshub.rss.ink",
-    "https://rsshub.pseudoyu.com"
-]
 
 def load_processed_ids():
     if os.path.exists("processed_videos.json"):
@@ -69,63 +62,71 @@ def analyze_caption_with_local_ai(caption):
     
     return "Unknown", "", caption
 
-def get_video_from_rss(account_handle):
+def get_most_viral_video_from_account(account_handle):
     processed_ids = load_processed_ids()
     clean_handle = account_handle.replace("@", "").strip()
     
-    feed = None
-    for instance in RSSHUB_INSTANCES:
-        rss_url = f"{instance}/instagram/user/{clean_handle}"
-        print(f"📡 Provant feed RSS a: {rss_url}")
-        
-        try:
-            res = requests.get(rss_url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-            if res.status_code == 200:
-                feed = feedparser.parse(res.content)
-                if feed.entries:
-                    print(f"✅ Feed carregat amb èxit ({len(feed.entries)} entrades).")
-                    break
-        except Exception as e:
-            print(f"⚠️ Error en connectar amb {instance}: {e}")
-
-    if not feed or not feed.entries:
-        print("❌ No s'ha pogut obtenir el feed RSS de cap instància.")
+    print(f"📡 Scraping de @{clean_handle} via Apify (instagram-post-scraper)...")
+    
+    client = ApifyClient(APIFY_TOKEN)
+    
+    # Paràmetres per a l'Actor apify/instagram-post-scraper
+    run_input = {
+        "username": [clean_handle],
+        "resultsLimit": 15,
+        "skipPinnedPosts": True
+    }
+    
+    try:
+        run = client.actor("apify/instagram-post-scraper").call(run_input=run_input)
+        dataset_items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
+    except Exception as e:
+        print(f"❌ Error en executar l'Actor d'Apify: {e}")
         return None, None, None, None, None
 
-    for entry in feed.entries:
-        video_id = entry.get("id") or entry.get("link")
+    candidates = []
+    for item in dataset_items:
+        # Trobar URL del vídeo MP4
+        video_url = item.get("videoUrl") or item.get("displayUrl")
+        if not item.get("isVideo") and not item.get("videoUrl"):
+            continue
+            
+        video_id = str(item.get("id") or item.get("shortCode"))
         if video_id in processed_ids:
             continue
-
-        # Parsejar l'HTML de la descripció per extreure el vídeo .mp4 i la descripció neta
-        summary_html = entry.get("summary", "")
-        soup = BeautifulSoup(summary_html, "html.parser")
+            
+        views = item.get("videoViewCount") or item.get("likesCount") or 0
+        caption_text = item.get("caption") or ""
         
-        video_tag = soup.find("video")
-        video_url = None
-        if video_tag:
-            source_tag = video_tag.find("source")
-            video_url = source_tag["src"] if source_tag else video_tag.get("src")
+        if video_url:
+            candidates.append({
+                "id": video_id,
+                "url": video_url,
+                "views": views,
+                "caption": caption_text
+            })
         
-        # Si no hi ha vídeo (és una foto), passem al següent post
-        if not video_url:
-            continue
-
-        caption_raw = soup.get_text().strip()
-        print(f"🔥Vídeo trobat al feed RSS: {video_id}")
+    print(f"📊 Troba {len(candidates)} vídeos no processats.")
+    candidates.sort(key=lambda x: x["views"], reverse=True)
+    
+    for item in candidates:
+        video_id = item["id"]
+        video_url = item["url"]
+        caption_raw = item["caption"]
         
-        # Descarregar el vídeo MP4
+        print(f"🔥 Vídeo candidat trobat ({video_id}) amb {item['views']} visualitzacions.")
+        
         r = requests.get(video_url, stream=True)
         with open("temp_input.mp4", "wb") as f:
             for chunk in r.iter_content(chunk_size=1024*1024):
                 if chunk:
                     f.write(chunk)
-
-        print("🤖 Analitzant contingut amb Gemma 2...")
+                    
+        print("🤖 Analitzant i generant contingut amb Gemma 2...")
         credits, headline, generated_caption = analyze_caption_with_local_ai(caption_raw)
-
+        
         return "temp_input.mp4", video_id, credits, headline, generated_caption
-
+        
     return None, None, None, None, None
 
 def crop_content_bounding_box(video_path):
@@ -207,7 +208,7 @@ def main():
 
     for account in accounts:
         print(f"\n🚀 Processant compte: {account}")
-        video_file, video_id, credits, headline, generated_caption = get_video_from_rss(account)
+        video_file, video_id, credits, headline, generated_caption = get_most_viral_video_from_account(account)
         
         if video_file:
             process_video_canvas(video_file, "final_feedity.mp4")
