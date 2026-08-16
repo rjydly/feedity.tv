@@ -60,16 +60,18 @@ def analyze_caption_with_local_ai(caption):
 
 def get_most_viral_video_from_account(account_handle):
     processed_ids = load_processed_ids()
+    # Treure la '@' i espais per no trencar la URL d'Instagram
     clean_handle = account_handle.replace("@", "").strip()
     
-    print(f"📡 Scraping de @{clean_handle} via Apify...")
+    print(f"📡 Scraping de Reels de @{clean_handle} via Apify...")
     
     client = ApifyClient(APIFY_TOKEN)
     
+    # Apuntem directament a la pestanya /reels/ per assegurar vídeos
     run_input = {
-        "directUrls": [f"https://www.instagram.com/{clean_handle}/"],
+        "directUrls": [f"https://www.instagram.com/{clean_handle}/reels/"],
         "resultsType": "posts",
-        "resultsLimit": 12,
+        "resultsLimit": 15,
         "searchType": "hashtag"
     }
     
@@ -82,24 +84,24 @@ def get_most_viral_video_from_account(account_handle):
 
     candidates = []
     for item in dataset_items:
-        if item.get("type") != "Video" and not item.get("isVideo", False):
+        # Apify pot retornar 'Video', 'Reel' o no definir-ho bé si porta 'videoUrl'
+        video_url = item.get("videoUrl")
+        if not video_url:
             continue
             
         video_id = str(item.get("id") or item.get("shortCode"))
         if video_id in processed_ids:
             continue
             
-        views = item.get("videoViewCount") or item.get("likesCount") or 0
-        video_url = item.get("videoUrl")
+        views = item.get("videoViewCount") or item.get("playCount") or item.get("likesCount") or 0
         caption_text = item.get("caption") or ""
         
-        if video_url:
-            candidates.append({
-                "id": video_id,
-                "url": video_url,
-                "views": views,
-                "caption": caption_text
-            })
+        candidates.append({
+            "id": video_id,
+            "url": video_url,
+            "views": views,
+            "caption": caption_text
+        })
         
     candidates.sort(key=lambda x: x["views"], reverse=True)
     
