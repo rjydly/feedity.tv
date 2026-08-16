@@ -70,11 +70,12 @@ def get_most_viral_video_from_account(account_handle):
     
     client = ApifyClient(APIFY_TOKEN)
     
-    # Utilitzem la URL estàndard del perfil, que és la suportada oficialment per l'actor
+    # Paràmetres oficials recomanats per a apify/instagram-scraper
     run_input = {
-        "directUrls": [f"https://www.instagram.com/{clean_handle}/"],
+        "usernames": [clean_handle],
         "resultsType": "posts",
-        "resultsLimit": 20
+        "resultsLimit": 20,
+        "addParentData": False
     }
     
     try:
@@ -86,7 +87,7 @@ def get_most_viral_video_from_account(account_handle):
 
     candidates = []
     for item in dataset_items:
-        # Detectem qualsevol publicació que contingui una URL de vídeo
+        # Acceptem qualsevol ítem que porti URL de vídeo directa
         video_url = item.get("videoUrl")
         if not video_url:
             continue
@@ -105,6 +106,7 @@ def get_most_viral_video_from_account(account_handle):
             "caption": caption_text
         })
         
+    print(f"📊 Troba {len(candidates)} vídeos potencials no processats.")
     candidates.sort(key=lambda x: x["views"], reverse=True)
     
     for item in candidates:
@@ -127,6 +129,7 @@ def get_most_viral_video_from_account(account_handle):
         
     return None, None, None, None, None
 
+    
 def crop_content_bounding_box(video_path):
     cap = cv2.VideoCapture(video_path)
     ret, frame = cap.read()
