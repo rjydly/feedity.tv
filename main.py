@@ -1,296 +1,191 @@
 import os
+import re
 import json
-import csv
-import subprocess
 import requests
-import cv2
 import numpy as np
+import cv2
 import ollama
-from PIL import Image, ImageDraw, ImageFont
 from moviepy import VideoFileClip, CompositeVideoClip, ImageClip
 
+# Configurar variables des del workflow
+RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TEST_MODE = False  # Canviar a True si només vols fer proves sense desar historial
 
-# ==========================================
-# CONFIGURACIÓ I VARIABLES D'ENTORN
-# ==========================================
-TEST_MODE = True  # Canvia a False per a producció
-
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "EL_TEU_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "EL_TEU_CHAT_ID")
-
-PROCESSED_FILE = "processed_videos.json"
-ASSETS_DIR = "assets"
-LOGO_PATH = os.path.join(ASSETS_DIR, "logo.png")
-OUTPUT_VIDEO_PATH = "output_feedity.mp4"
-
-# ==========================================
-# 1. GESTIÓ DE VÍDEOS PROCESSATS
-# ==========================================
+# Carregar historial de vídeos ja processats
 def load_processed_ids():
-    if os.path.exists(PROCESSED_FILE):
-        with open(PROCESSED_FILE, "r", encoding="utf-8") as f:
-            return set(json.load(f))
-    return set()
+    if os.path.exists("processed_videos.json"):
+        try:
+            with open("processed_videos.json", "r") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
 
 def save_processed_id(video_id):
     if TEST_MODE:
-        print("🧪 [TEST_MODE] Mode de prova actiu: No s'enregistra l'ID al fitxer JSON.")
         return
-    processed = load_processed_ids()
-    processed.add(video_id)
-    with open(PROCESSED_FILE, "w", encoding="utf-8") as f:
-        json.dump(list(processed), f, indent=4)
+    history = load_processed_ids()
+    if video_id not in history:
+        history.append(video_id)
+        with open("processed_videos.json", "w") as f:
+            json.dump(history, f, indent=4)
 
-# ==========================================
-# 2. ANÀLISI DE CAPTION AMB IA LOCAL (OLLAMA)
-# ==========================================
-def analyze_caption_with_local_ai(caption_text):
-    """
-    Crida a Ollama en local per analitzar el caption, extreure els crèdits originals
-    i generar un titular breu.
-    """
-    if not caption_text:
-        return "Via @wealth", "Viral Clip"
-
+# Analitzar el text del Reel amb la IA local (Gemma 2)
+def analyze_caption_with_local_ai(caption):
     prompt = f"""
-    Analitza el següent text d'una publicació de xarxes socials.
-    Anomena la font original o autor del contingut (busca mencions com 'cr:', 'via:', 'cc:' o usuaris amb '@').
-    I crea un titular o resumeix la idea en 3 a 5 paraules.
-    
-    TEXT ORIGINAL:
-    "{caption_text}"
-    
-    Respon ÚNICAMENT en un JSON vàlid amb aquesta estructura:
-    {{
-        "credits": "Via @nom_de_usuari",
-        "headline": "Titular Breu I Impactant"
-    }}
-    """
+    Extreu dues coses d'aquesta descripció de xarxes socials:
+    1. Els crèdits o l'autor original del vídeo (p. ex., @usuari). Si no n'hi ha, posa "Unknown".
+    2. Un titular o resum impactant de màxim 6 paraules en anglès.
 
+    Descripció: "{caption}"
+
+    Respon NORMÉS en format JSON com aquest:
+    {{"credits": "@usuari", "headline": "Titular Impactant Del Video"}}
+    """
     try:
         response = ollama.chat(
-            model="gemma2",
-            messages=[{"role": "user", "content": prompt}],
-            format="json"
+            model='gemma2',
+            messages=[{'role': 'user', 'content': prompt}]
         )
-        data = json.loads(response['message']['content'])
-        credits = data.get("credits", "Via @wealth")
-        headline = data.get("headline", "")
-        return credits, headline
+        content = response['message']['content']
+        match = re.search(r'\{.*\}', content, re.DOTALL)
+        if match:
+            data = json.loads(match.group())
+            return data.get("credits", "Unknown"), data.get("headline", "")
     except Exception as e:
-        print(f"⚠️ Error executant la IA local (Ollama): {e}")
-        return "Via @wealth", ""
+        print(f"⚠️ Error en analitzar amb Ollama: {e}")
+    
+    return "Unknown", ""
 
-# ==========================================
-# 3. CERCA DEL MÉS VIRAL I DESCARREGA
-# ==========================================
+# Extreure el Reel més viral des de RapidAPI
 def get_most_viral_video_from_account(account_handle):
     processed_ids = load_processed_ids()
-    url = f"https://www.instagram.com/{account_handle.replace('@', '')}/"
+    clean_handle = account_handle.replace("@", "").strip()
     
-    cmd = [
-        "yt-dlp",
-        "--flat-playlist",
-        "--dump-single-json",
-        "--playlist-end", "15",
-        url
-    ]
+    print(f"📡 Obtenint Reels de @{clean_handle} via RapidAPI...")
     
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    if res.returncode != 0:
-        print(f"❌ Error en llegir el compte {account_handle}")
+    url = "https://website-social-scraper-api.p.rapidapi.com/get-social-details"
+    headers = {
+        "X-RapidAPI-Key": RAPIDAPI_KEY,
+        "X-RapidAPI-Host": "website-social-scraper-api.p.rapidapi.com"
+    }
+    params = {"username": clean_handle}
+    
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=15)
+        if response.status_code != 200:
+            print(f"❌ Error API ({response.status_code}): {response.text}")
+            return None, None, None, None
+            
+        data = response.json()
+        items = data.get("posts", []) or data.get("data", [])
+    except Exception as e:
+        print(f"❌ Error de connexió amb RapidAPI: {e}")
         return None, None, None, None
+
+    candidates = []
+    for node in items:
+        if not node.get("is_video", True):
+            continue
+            
+        video_id = str(node.get("id") or node.get("shortcode"))
+        if video_id in processed_ids:
+            continue
+            
+        views = node.get("video_view_count") or node.get("like_count", 0)
+        video_url = node.get("video_url")
+        caption_text = node.get("caption") or ""
         
-    data = json.loads(res.stdout)
-    entries = data.get("entries", [])
+        if video_url:
+            candidates.append({
+                "id": video_id,
+                "url": video_url,
+                "views": views,
+                "caption": caption_text
+            })
+        
+    candidates.sort(key=lambda x: x["views"], reverse=True)
     
-    valid_entries = [e for e in entries if e.get("id") not in processed_ids]
-    sorted_entries = sorted(
-        valid_entries, 
-        key=lambda x: x.get("like_count") or x.get("view_count") or 0, 
-        reverse=True
-    )
-    
-    for entry in sorted_entries:
-        video_id = entry.get("id")
-        video_url = entry.get("url") or entry.get("webpage_url")
-        print(f"🔍 Avaluant vídeo {video_id} de {account_handle}...")
+    for item in candidates:
+        video_id = item["id"]
+        video_url = item["url"]
+        caption_raw = item["caption"]
         
-        dl_cmd = [
-            "yt-dlp",
-            "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-            "--write-description",
-            "-o", "temp_input.%(ext)s",
-            video_url
-        ]
-        subprocess.run(dl_cmd, check=True)
+        print(f"🔥 Vídeo candidat trobat ({video_id}) amb {item['views']} reproduccions.")
         
-        caption_raw = ""
-        if os.path.exists("temp_input.description"):
-            with open("temp_input.description", "r", encoding="utf-8") as f:
-                caption_raw = f.read()
-                
-        print("🤖 Processant el caption amb la IA local (Gemma)...")
+        r = requests.get(video_url, stream=True)
+        with open("temp_input.mp4", "wb") as f:
+            for chunk in r.iter_content(chunk_size=1024*1024):
+                if chunk:
+                    f.write(chunk)
+                    
+        print("🤖 Analitzant caption amb Gemma...")
         credits, headline = analyze_caption_with_local_ai(caption_raw)
         
         return "temp_input.mp4", video_id, credits, headline
         
     return None, None, None, None
 
-# ==========================================
-# 4. VALIDAció I CÀLCUL DE BBOX (OPENCV)
-# ==========================================
-def detect_and_validate_video(video_path):
-    cap = cv2.VideoCapture(video_path)
-    ret, frame = cap.read()
-    cap.release()
+# Processament del vídeo a format 9:16 vertical
+def process_video_canvas(input_path, output_path="output.mp4"):
+    clip = VideoFileClip(input_path)
     
-    if not ret or frame is None:
-        return False, None
-        
-    h_img, w_img, _ = frame.shape
-    total_area = h_img * w_img
-    aspect_ratio = w_img / float(h_img)
+    # Comprovar si el vídeo ja és vertical o si cal encadirar-lo
+    w, h = clip.size
+    if h > w:
+        print("📐 El vídeo ja és vertical. Ajustant directament a 1080x1920...")
+        final_clip = clip.resized(height=1920) if clip.h != 1920 else clip
+    else:
+        print("📐 Convertint vídeo horitzontal a canvas 9:16...")
+        # Centrar el vídeo sobre un fons de 1080x1920
+        scaled_clip = clip.resized(width=1080)
+        final_clip = CompositeVideoClip([scaled_clip.with_position("center")], size=(1080, 1920))
     
-    # REGLA 1: Descartar si el vídeo font ja és vertical complet (9:16)
-    if 0.50 <= aspect_ratio <= 0.62:
-        print("❌ Descartat: El vídeo ja té format vertical complet 9:16.")
-        return False, None
-
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    edges = cv2.Canny(gray, 50, 150)
-    kernel = np.ones((5, 5), np.uint8)
-    closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
-    
-    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    best_bbox = None
-    max_area = 0
-    
-    for c in contours:
-        x, y, w, h = cv2.boundingRect(c)
-        area = w * h
-        ar = w / float(h)
-        
-        # El marc del vídeo ha de tenir una mida raonable
-        if area > (total_area * 0.20) and (0.8 <= ar <= 2.2):
-            if area > max_area:
-                max_area = area
-                best_bbox = (x, y, w, h)
-                
-    if best_bbox is None:
-        print("❌ Descartat: No s'ha pogut determinar el marc del vídeo interior.")
-        return False, None
-        
-    bx, by, bw, bh = best_bbox
-    if bw >= (w_img * 0.98) and bh >= (h_img * 0.98):
-        print("❌ Descartat: Marca d'enquadrament dubtosa (ocupa el 100% del frame).")
-        return False, None
-        
-    print(f"✅ Enquadrament detectat: x={bx}, y={by}, w={bw}, h={bh}")
-    return True, best_bbox
-
-# ==========================================
-# 5. GENERACIÓ DEL CANVAS 9:16 (MOVIEPY / PIL)
-# ==========================================
-def render_feedity_canvas(video_path, bbox, credits_text, headline_text):
-    x, y, w, h = bbox
-    clip = VideoFileClip(video_path)
-    
-    # Retallat segons les coordenades exactes en píxels
-    cropped_clip = clip.crop(x1=x, y1=y, width=w, height=h)
-    
-    canvas_w, canvas_h = 1080, 1920
-    scaled_clip = cropped_clip.resize(width=canvas_w)
-    
-    video_y_position = (canvas_h - scaled_clip.h) // 2
-    positioned_video = scaled_clip.set_position(("center", video_y_position))
-    
-    # Fons fosc Pubity-style
-    overlay_img = Image.new("RGBA", (canvas_w, canvas_h), (15, 15, 15, 255))
-    draw = ImageDraw.Draw(overlay_img)
-    
-    # Carregar logo transparent des de assets/
-    if os.path.exists(LOGO_PATH):
-        logo = Image.open(LOGO_PATH).convert("RGBA")
-        logo = logo.resize((120, 120))
-        overlay_img.paste(logo, ((canvas_w - 120) // 2, 120), logo)
-        
-    # Fonts
-    try:
-        font_credits = ImageFont.truetype("Lexend-Regular.ttf", 28)
-        font_headline = ImageFont.truetype("Lexend-Bold.ttf", 40)
-    except:
-        font_credits = ImageFont.load_default()
-        font_headline = ImageFont.load_default()
-        
-    # Dibuixar Titular (A dalt del vídeo, sota el logo)
-    if headline_text:
-        draw.text((canvas_w // 2, 280), headline_text.upper(), fill=(255, 255, 255), font=font_headline, anchor="ms")
-        
-    # Dibuixar Font / Crèdits (A baix del vídeo)
-    draw.text((canvas_w // 2, canvas_h - 150), f"Source: {credits_text}", fill=(180, 180, 180), font=font_credits, anchor="ms")
-    
-    overlay_img.save("temp_overlay.png")
-    overlay_clip = ImageClip("temp_overlay.png").set_duration(clip.duration)
-    
-    final_clip = CompositeVideoClip([overlay_clip, positioned_video], size=(canvas_w, canvas_h))
-    final_clip.write_videofile(OUTPUT_VIDEO_PATH, fps=30, codec="libx264", audio_codec="aac")
-    
+    final_clip.write_videofile(output_path, codec="libx264", audio_codec="aac")
     clip.close()
     final_clip.close()
 
-# ==========================================
-# 6. ENVIAMENT A TELEGRAM (TEST_MODE)
-# ==========================================
-def send_telegram_video(video_path, caption):
-    print("📤 Enviant vídeo de prova a Telegram...")
+# Enviar el vídeo acabat per Telegram
+def send_telegram_notification(video_path, caption):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("⚠️ Notificació de Telegram omessa (manten fitxers no configurats).")
+        return
+        
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
     with open(video_path, "rb") as video_file:
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption}
         files = {"video": video_file}
-        response = requests.post(url, data=payload, files=files)
-        
-    if response.status_code == 200:
-        print("✅ Vídeo enviat correctament a Telegram!")
-    else:
-        print(f"❌ Error enviant a Telegram: {response.text}")
+        data = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption}
+        res = requests.post(url, data=data, files=files)
+        if res.status_code == 200:
+            print("🚀 Vídeo enviat correctament a Telegram!")
+        else:
+            print(f"❌ Error en enviar a Telegram: {res.text}")
 
-# ==========================================
-# EXECUCIÓ PRINCIPAL
-# ==========================================
 def main():
-    sources = []
-    if os.path.exists("sources.csv"):
-        with open("sources.csv", mode="r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            sources = [row["account_handle"] for row in reader if row.get("account_handle")]
-            
-    if not sources:
-        sources = ["@wealth"]
-        
-    for account in sources:
+    if not os.path.exists("sources.csv"):
+        print("❌ No s'ha trobat el fitxer sources.csv")
+        return
+
+    with open("sources.csv", "r") as f:
+        accounts = [line.strip() for line in f if line.strip() and not line.startswith("account_handle")]
+
+    for account in accounts:
         print(f"\n🚀 Processant compte: {account}")
         video_file, video_id, credits, headline = get_most_viral_video_from_account(account)
         
-        if not video_file:
-            print("⚠️ No s'han trobat nous vídeos virals per analitzar.")
-            continue
+        if video_file:
+            process_video_canvas(video_file, "final_feedity.mp4")
             
-        is_valid, bbox = detect_and_validate_video(video_file)
-        
-        if is_valid:
-            print("🎨 Generant canvas 9:16 i retallant el vídeo...")
-            render_feedity_canvas(video_file, bbox, credits, headline)
+            telegram_text = f"✨ **Nou contingut a punt**\n\n📌 **Headline**: {headline}\n👤 **Crèdits**: {credits}\n🆔 **ID**: {video_id}"
+            send_telegram_notification("final_feedity.mp4", telegram_text)
             
-            caption_text = f"📹 Feedity TV Preview\n\n📌 Account: {account}\n👤 Credits: {credits}\n💡 Headline: {headline}\n🆔 Video ID: {video_id}"
-            
-            if TEST_MODE:
-                send_telegram_video(OUTPUT_VIDEO_PATH, caption_text)
-            else:
-                save_processed_id(video_id)
-                print("🚀 [PROD] Vídeo preparat per a la publicació automàtica.")
+            save_processed_id(video_id)
+            print("✅ Procés finalitzat amb èxit!")
             break
+        else:
+            print(f"⚠️ No s'han trobat nous vídeos no processats per a {account}.")
 
 if __name__ == "__main__":
     main()
