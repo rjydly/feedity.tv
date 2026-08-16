@@ -1,59 +1,53 @@
-name: Feedity Pipeline
+name: Feedity Reel Processing Pipeline
 
 on:
   schedule:
-    # S'executa cada dia a les 12:00 i a les 18:00 UTC
-    - cron: '0 12,18 * * *'
-  workflow_dispatch: # Permet executar el script manualment des de GitHub Actions
+    # S'executa cada 6 hores automàticament
+    - cron: '0 */6 * * *'
+  workflow_dispatch: # Permet l'execució manual des de la pestanya Actions
 
 jobs:
-  run-pipeline:
+  process-reels:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout del repositori
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Configurar entorn de Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
           cache: 'pip'
 
-      - name: Instal·lar FFmpeg
+      - name: Install System Dependencies (FFmpeg & OpenCV)
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg libgl1-mesa-glx
 
-      - name: Instal·lar dependències de Python
+      - name: Install Python Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install apify-client>=1.8.0 opencv-python-headless>=4.8.0 pillow>=10.0.0 moviepy>=2.0.0 requests>=2.31.0 ollama>=0.1.0 numpy>=1.24.0
 
-      - name: Instal·lar i arrancar Ollama
+      - name: Install and Start Ollama Service
         run: |
           curl -fsSL https://ollama.com/install.sh | sh
           ollama serve &
           sleep 5
           ollama pull gemma2
 
-      - name: Executar Pipeline de Feedity
+      - name: Run Main Processing Script
         env:
+          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
         run: |
           python main.py
 
-      - name: Desa l'historial de vídeos processats (Si no està en TEST_MODE)
-        if: always()
+      - name: Commit and Push Processed Video History
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          if [ -f processed_videos.json ]; then
-            git add processed_videos.json
-            git commit -m "chore: update processed videos history [skip ci]" || exit 0
-            git push
-          else
-            echo "El fitxer processed_videos.json no existeix encara (normal en TEST_MODE)."
-          fi
+          git add processed_videos.json || true
+          git diff --quiet && git diff --staged --quiet || (git commit -m "update: add processed video id" && git push)
