@@ -4,7 +4,7 @@ on:
   schedule:
     # S'executa cada dia a les 12:00 i a les 18:00 UTC
     - cron: '0 12,18 * * *'
-  workflow_dispatch: # Permet executar el script manualment des de la pestanya Actions de GitHub
+  workflow_dispatch: # Permet executar el script manualment des de GitHub Actions
 
 jobs:
   run-pipeline:
@@ -29,6 +29,37 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: Instal·lar i arrancar Ollama
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama serve &
+          sleep 5
+          ollama pull gemma2
+
+      - name: Instal·lar la darrera versió de yt-dlp
+        run: |
+          python -m pip install --upgrade yt-dlp
+
+      - name: Executar Pipeline de Feedity
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python main.py
+
+      - name: Desa l'historial de vídeos processats (Si no està en TEST_MODE)
+        if: always()
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -f processed_videos.json ]; then
+            git add processed_videos.json
+            git commit -m "chore: update processed videos history [skip ci]" || exit 0
+            git push
+          else
+            echo "El fitxer processed_videos.json no existeix encara (normal en TEST_MODE)."
+          fi
 
       - name: Instal·lar i arrancar Ollama
         run: |
