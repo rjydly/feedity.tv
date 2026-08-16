@@ -8,11 +8,10 @@ import ollama
 from apify_client import ApifyClient
 from moviepy import VideoFileClip, CompositeVideoClip
 
-# Configurar variables des de les variables d'entorn
 APIFY_TOKEN = os.getenv("APIFY_TOKEN")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-TEST_MODE = False  # Canviar a True si només vols fer proves sense desar l'historial
+TEST_MODE = False
 
 def load_processed_ids():
     if os.path.exists("processed_videos.json"):
@@ -34,14 +33,15 @@ def save_processed_id(video_id):
 
 def analyze_caption_with_local_ai(caption):
     prompt = f"""
-    Extreu dues coses d'aquesta descripció de xarxes socials:
+    Analitza aquesta descripció de xarxes socials i genera:
     1. Els crèdits o l'autor original del vídeo (p. ex., @usuari). Si no n'hi ha, posa "Unknown".
-    2. Un titular o resum impactant de màxim 6 paraules en anglès.
+    2. Un títol o headline impactant de màxim 6 paraules en anglès per posar a sobre del vídeo.
+    3. Una nova descripció (caption) optimitzada per a Instagram/TikTok en anglès, amb crida a l'acció (CTA) i hashtags virals.
 
-    Descripció: "{caption}"
+    Descripció original: "{caption}"
 
     Respon NOMÉS en format JSON com aquest:
-    {{"credits": "@usuari", "headline": "Titular Impactant Del Video"}}
+    {{"credits": "@usuari", "headline": "Titular Impactant", "generated_caption": "Text de la descripció nova amb hashtags..."}}
     """
     try:
         response = ollama.chat(
@@ -52,27 +52,29 @@ def analyze_caption_with_local_ai(caption):
         match = re.search(r'\{.*\}', content, re.DOTALL)
         if match:
             data = json.loads(match.group())
-            return data.get("credits", "Unknown"), data.get("headline", "")
+            return (
+                data.get("credits", "Unknown"), 
+                data.get("headline", ""), 
+                data.get("generated_caption", "")
+            )
     except Exception as e:
         print(f"⚠️ Error en analitzar amb Ollama: {e}")
     
-    return "Unknown", ""
+    return "Unknown", "", caption
 
 def get_most_viral_video_from_account(account_handle):
     processed_ids = load_processed_ids()
-    # Treure la '@' i espais per no trencar la URL d'Instagram
     clean_handle = account_handle.replace("@", "").strip()
     
-    print(f"📡 Scraping de Reels de @{clean_handle} via Apify...")
+    print(f"📡 Scraping de @{clean_handle} via Apify...")
     
     client = ApifyClient(APIFY_TOKEN)
     
-    # Apuntem directament a la pestanya /reels/ per assegurar vídeos
+    # Utilitzem la URL estàndard del perfil, que és la suportada oficialment per l'actor
     run_input = {
-        "directUrls": [f"https://www.instagram.com/{clean_handle}/reels/"],
+        "directUrls": [f"https://www.instagram.com/{clean_handle}/"],
         "resultsType": "posts",
-        "resultsLimit": 15,
-        "searchType": "hashtag"
+        "resultsLimit": 20
     }
     
     try:
@@ -80,11 +82,11 @@ def get_most_viral_video_from_account(account_handle):
         dataset_items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
     except Exception as e:
         print(f"❌ Error en executar l'Actor d'Apify: {e}")
-        return None, None, None, None
+        return None, None, None, None, None
 
     candidates = []
     for item in dataset_items:
-        # Apify pot retornar 'Video', 'Reel' o no definir-ho bé si porta 'videoUrl'
+        # Detectem qualsevol publicació que contingui una URL de vídeo
         video_url = item.get("videoUrl")
         if not video_url:
             continue
@@ -110,7 +112,7 @@ def get_most_viral_video_from_account(account_handle):
         video_url = item["url"]
         caption_raw = item["caption"]
         
-        print(f"🔥 Vídeo candidat trobat ({video_id}) amb {item['views']} reproduccions.")
+        print(f"🔥 Vídeo candidat trobat ({video_id}) amb {item['views']} visualitzacions.")
         
         r = requests.get(video_url, stream=True)
         with open("temp_input.mp4", "wb") as f:
@@ -118,15 +120,14 @@ def get_most_viral_video_from_account(account_handle):
                 if chunk:
                     f.write(chunk)
                     
-        print("🤖 Analitzant caption amb Gemma...")
-        credits, headline = analyze_caption_with_local_ai(caption_raw)
+        print("🤖 Analitzant i generant contingut amb Gemma 2...")
+        credits, headline, generated_caption = analyze_caption_with_local_ai(caption_raw)
         
-        return "temp_input.mp4", video_id, credits, headline
+        return "temp_input.mp4", video_id, credits, headline, generated_caption
         
-    return None, None, None, None
+    return None, None, None, None, None
 
 def crop_content_bounding_box(video_path):
-    """Detecta la regió del vídeo real ignorant els marcs negres i textos adjunts."""
     cap = cv2.VideoCapture(video_path)
     ret, frame = cap.read()
     cap.release()
@@ -150,7 +151,7 @@ def process_video_canvas(input_path, output_path="final_feedity.mp4"):
     
     if bbox and bbox[2] > 100 and bbox[3] > 100:
         x, y, w, h = bbox
-        print(f"✂️ Crop Bounding Box aplicat: x={x}, y={y}, w={w}, h={h}")
+        print(f"✂️ Crop aplicat: x={x}, y={y}, w={w}, h={h}")
         cropped_clip = clip.cropped(x1=x, y1=y, x2=x+w, y2=y+h)
     else:
         cropped_clip = clip
@@ -167,18 +168,31 @@ def process_video_canvas(input_path, output_path="final_feedity.mp4"):
     cropped_clip.close()
     final_clip.close()
 
-def send_telegram_notification(video_path, caption):
+def send_telegram_notification(video_path, headline, credits, generated_caption, video_id):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("⚠️ Notificació de Telegram omessa (tokens no configurats).")
         return
         
+    message_text = (
+        f"🎬 **NOU VÍDEO PROCESSAT PER A FEEDITY**\n\n"
+        f"📌 **Títol del vídeo**: {headline}\n"
+        f"👤 **Crèdits originals**: {credits}\n"
+        f"🆔 **ID**: {video_id}\n\n"
+        f"📝 **CAPTION GENERAT PER A PUBLICAR**:\n"
+        f"```text\n{generated_caption}\n```"
+    )
+    
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
     with open(video_path, "rb") as video_file:
         files = {"video": video_file}
-        data = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption}
+        data = {
+            "chat_id": TELEGRAM_CHAT_ID, 
+            "caption": message_text,
+            "parse_mode": "Markdown"
+        }
         res = requests.post(url, data=data, files=files)
         if res.status_code == 200:
-            print("🚀 Vídeo enviat correctament a Telegram!")
+            print("🚀 Vídeo i dades enviats correctament a Telegram!")
         else:
             print(f"❌ Error en enviar a Telegram: {res.text}")
 
@@ -192,14 +206,11 @@ def main():
 
     for account in accounts:
         print(f"\n🚀 Processant compte: {account}")
-        video_file, video_id, credits, headline = get_most_viral_video_from_account(account)
+        video_file, video_id, credits, headline, generated_caption = get_most_viral_video_from_account(account)
         
         if video_file:
             process_video_canvas(video_file, "final_feedity.mp4")
-            
-            telegram_text = f"✨ **Nou contingut a punt**\n\n📌 **Headline**: {headline}\n👤 **Crèdits**: {credits}\n🆔 **ID**: {video_id}"
-            send_telegram_notification("final_feedity.mp4", telegram_text)
-            
+            send_telegram_notification("final_feedity.mp4", headline, credits, generated_caption, video_id)
             save_processed_id(video_id)
             print("✅ Procés finalitzat amb èxit!")
             break
