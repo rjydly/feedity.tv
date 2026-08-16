@@ -11,7 +11,7 @@ from moviepy import VideoFileClip, CompositeVideoClip, ImageClip
 RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-TEST_MODE = False  # Canviar a True si només vols fer proves sense desar historial
+TEST_MODE = True  # Canviar a True si només vols fer proves sense desar historial
 
 # Carregar historial de vídeos ja processats
 def load_processed_ids():
