@@ -5,15 +5,15 @@ import requests
 import numpy as np
 import cv2
 import ollama
-from moviepy import VideoFileClip, CompositeVideoClip, ImageClip
+from apify_client import ApifyClient
+from moviepy import VideoFileClip, CompositeVideoClip
 
 # Configurar variables des del workflow
-RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
+APIFY_TOKEN = os.getenv("APIFY_TOKEN")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-TEST_MODE = True  # Canviar a True si només vols fer proves sense desar historial
+TEST_MODE = False
 
-# Carregar historial de vídeos ja processats
 def load_processed_ids():
     if os.path.exists("processed_videos.json"):
         try:
@@ -32,7 +32,6 @@ def save_processed_id(video_id):
         with open("processed_videos.json", "w") as f:
             json.dump(history, f, indent=4)
 
-# Analitzar el text del Reel amb la IA local (Gemma 2)
 def analyze_caption_with_local_ai(caption):
     prompt = f"""
     Extreu dues coses d'aquesta descripció de xarxes socials:
@@ -41,7 +40,7 @@ def analyze_caption_with_local_ai(caption):
 
     Descripció: "{caption}"
 
-    Respon NORMÉS en format JSON com aquest:
+    Respon NOMÉS en format JSON com aquest:
     {{"credits": "@usuari", "headline": "Titular Impactant Del Video"}}
     """
     try:
@@ -59,44 +58,43 @@ def analyze_caption_with_local_ai(caption):
     
     return "Unknown", ""
 
-# Extreure el Reel més viral des de RapidAPI
 def get_most_viral_video_from_account(account_handle):
     processed_ids = load_processed_ids()
     clean_handle = account_handle.replace("@", "").strip()
     
-    print(f"📡 Obtenint Reels de @{clean_handle} via RapidAPI...")
+    print(f"📡 Scraping de @{clean_handle} via Apify...")
     
-    url = "https://website-social-scraper-api.p.rapidapi.com/get-social-details"
-    headers = {
-        "X-RapidAPI-Key": RAPIDAPI_KEY,
-        "X-RapidAPI-Host": "website-social-scraper-api.p.rapidapi.com"
+    client = ApifyClient(APIFY_TOKEN)
+    
+    # Paràmetres per a l'Actor oficial d'Instagram de Apify
+    run_input = {
+        "directUrls": [f"https://www.instagram.com/{clean_handle}/"],
+        "resultsType": "posts",
+        "resultsLimit": 12,
+        "searchType": "hashtag"
     }
-    params = {"username": clean_handle}
     
     try:
-        response = requests.get(url, headers=headers, params=params, timeout=15)
-        if response.status_code != 200:
-            print(f"❌ Error API ({response.status_code}): {response.text}")
-            return None, None, None, None
-            
-        data = response.json()
-        items = data.get("posts", []) or data.get("data", [])
+        # Executa l'actor de scraping d'Instagram
+        run = client.actor("apify/instagram-scraper").call(run_input=run_input)
+        dataset_items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
     except Exception as e:
-        print(f"❌ Error de connexió amb RapidAPI: {e}")
+        print(f"❌ Error en executar l'Actor d'Apify: {e}")
         return None, None, None, None
 
     candidates = []
-    for node in items:
-        if not node.get("is_video", True):
+    for item in dataset_items:
+        # Filtrem només els vídeos / Reels
+        if item.get("type") != "Video" and not item.get("isVideo", False):
             continue
             
-        video_id = str(node.get("id") or node.get("shortcode"))
+        video_id = str(item.get("id") or item.get("shortCode"))
         if video_id in processed_ids:
             continue
             
-        views = node.get("video_view_count") or node.get("like_count", 0)
-        video_url = node.get("video_url")
-        caption_text = node.get("caption") or ""
+        views = item.get("videoViewCount") or item.get("likesCount") or 0
+        video_url = item.get("videoUrl")
+        caption_text = item.get("caption") or ""
         
         if video_url:
             candidates.append({
@@ -106,6 +104,7 @@ def get_most_viral_video_from_account(account_handle):
                 "caption": caption_text
             })
         
+    # Ordenem pel més viral
     candidates.sort(key=lambda x: x["views"], reverse=True)
     
     for item in candidates:
@@ -128,18 +127,15 @@ def get_most_viral_video_from_account(account_handle):
         
     return None, None, None, None
 
-# Processament del vídeo a format 9:16 vertical
 def process_video_canvas(input_path, output_path="output.mp4"):
     clip = VideoFileClip(input_path)
-    
-    # Comprovar si el vídeo ja és vertical o si cal encadirar-lo
     w, h = clip.size
+    
     if h > w:
-        print("📐 El vídeo ja és vertical. Ajustant directament a 1080x1920...")
+        print("📐 El vídeo ja és vertical. Ajustant a 1080x1920...")
         final_clip = clip.resized(height=1920) if clip.h != 1920 else clip
     else:
         print("📐 Convertint vídeo horitzontal a canvas 9:16...")
-        # Centrar el vídeo sobre un fons de 1080x1920
         scaled_clip = clip.resized(width=1080)
         final_clip = CompositeVideoClip([scaled_clip.with_position("center")], size=(1080, 1920))
     
@@ -147,10 +143,9 @@ def process_video_canvas(input_path, output_path="output.mp4"):
     clip.close()
     final_clip.close()
 
-# Enviar el vídeo acabat per Telegram
 def send_telegram_notification(video_path, caption):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ Notificació de Telegram omessa (manten fitxers no configurats).")
+        print("⚠️ Notificació de Telegram omessa (tokens no configurats).")
         return
         
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
