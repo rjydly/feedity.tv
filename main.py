@@ -429,25 +429,55 @@ def send_telegram_notification(video_path, headline, credits, generated_caption,
         return
         
     print("📤 Enviant notificació i vídeo a Telegram...", flush=True)
-    message_text = (
-        f"🎬 **NOU VÍDEO PROCESSAT PER A FEEDITY**\n\n"
-        f"📌 **Títol del vídeo**: {headline}\n"
-        f"👤 **Crèdits originals**: {credits}\n"
-        f"🆔 **ID**: {video_id}\n\n"
-        f"📝 **CAPTION GENERAT PER A PUBLICAR**:\n"
-        f"```text\n{generated_caption}\n```"
-    )
-    
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
-    with open(video_path, "rb") as video_file:
-        files = {"video": video_file}
-        data = {
-            "chat_id": TELEGRAM_CHAT_ID, 
-            "caption": message_text,
-            "parse_mode": "Markdown"
-        }
-        requests.post(url, data=data, files=files)
 
+    # Clean HTML tags like <b> from headline for raw telegram markdown
+    clean_headline = re.sub(r'</?b>', '*', headline)
+
+    text_message = (
+        f"🎬 **NOU VÍDEO PROCESSAT PER A FEEDITY**\n\n"
+        f"📌 **Títol**: {clean_headline}\n"
+        f"👤 **Crèdits**: {credits}\n"
+        f"🆔 **ID**: {video_id}\n\n"
+        f"📝 **CAPTION A COPIAR**:\n\n"
+        f"{generated_caption}"
+    )
+
+    base_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+
+    try:
+        # 1. Enviem primer el missatge complet amb el caption per copiar
+        msg_response = requests.post(
+            f"{base_url}/sendMessage",
+            data={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": text_message
+            },
+            timeout=30
+        )
+        if not msg_response.ok:
+            print(f"⚠️ Error enviant el text a Telegram: {msg_response.text}", flush=True)
+
+        # 2. Enviem el fitxer de vídeo amb un caption curt (per no superar el límit de 1024 caràcters)
+        video_caption = f"🎬 {clean_headline}\n👤 {credits}"
+        
+        with open(video_path, "rb") as video_file:
+            video_response = requests.post(
+                f"{base_url}/sendVideo",
+                data={
+                    "chat_id": TELEGRAM_CHAT_ID,
+                    "caption": video_caption[:1000]  # Retalla de seguretat
+                },
+                files={"video": video_file},
+                timeout=120  # Timeout més alt per a la pujada del vídeo
+            )
+            
+        if video_response.ok:
+            print("✅ Vídeo enviat correctament a Telegram!", flush=True)
+        else:
+            print(f"❌ Error en enviar el vídeo a Telegram: {video_response.text}", flush=True)
+
+    except Exception as e:
+        print(f"❌ Error de connexió en enviar a Telegram: {e}", flush=True)
 
 def main():
     print("🚀 Iniciant pipeline de Feedity...", flush=True)
