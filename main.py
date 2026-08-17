@@ -7,7 +7,11 @@ import numpy as np
 import cv2
 import ollama
 import yt_dlp
-from moviepy import VideoFileClip, CompositeVideoClip
+from moviepy import VideoFileClip, CompositeVideoClip, TextClip
+
+# Font utilitzada per "cremar" el titular sobre el vídeo. DejaVu Sans Bold ve
+# preinstal·lada als runners d'ubuntu-latest de GitHub Actions.
+HEADLINE_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -157,7 +161,33 @@ def crop_content_bounding_box(video_path):
         return (x, y, w, h)
     return None
 
-def process_video_canvas(input_path, output_path="final_feedity.mp4"):
+def build_headline_clip(headline, duration, canvas_width=1080):
+    """Crea el TextClip del titular que es "crema" a sobre del vídeo."""
+    if not headline:
+        return None
+    try:
+        # NOTA: amb method="caption", moviepy/Pillow subestima l'alçada automàtica
+        # quan el text ocupa 2+ línies i acaba retallant la línia de sota.
+        # Per això fixem una alçada generosa en lloc de deixar-la en None.
+        txt_clip = TextClip(
+            font=HEADLINE_FONT,
+            text=headline.upper(),
+            font_size=80,
+            color="white",
+            stroke_color="black",
+            stroke_width=4,
+            method="caption",
+            size=(int(canvas_width * 0.9), 320),
+            text_align="center",
+            horizontal_align="center",
+            interline=20,
+        )
+        return txt_clip.with_duration(duration).with_position(("center", 140))
+    except Exception as e:
+        print(f"⚠️ No s'ha pogut generar el titular sobre el vídeo: {e}")
+        return None
+
+def process_video_canvas(input_path, headline, output_path="final_feedity.mp4"):
     clip = VideoFileClip(input_path)
     bbox = crop_content_bounding_box(input_path)
     
@@ -169,16 +199,22 @@ def process_video_canvas(input_path, output_path="final_feedity.mp4"):
         cropped_clip = clip
 
     scaled_clip = cropped_clip.resized(width=1080)
-    
-    final_clip = CompositeVideoClip(
-        [scaled_clip.with_position("center")],
-        size=(1080, 1920)
-    )
+
+    layers = [scaled_clip.with_position("center")]
+
+    headline_clip = build_headline_clip(headline, scaled_clip.duration)
+    if headline_clip:
+        print(f"🖋️ Sobreposant titular: {headline}")
+        layers.append(headline_clip)
+
+    final_clip = CompositeVideoClip(layers, size=(1080, 1920))
     
     final_clip.write_videofile(output_path, codec="libx264", audio_codec="aac")
     clip.close()
     cropped_clip.close()
     final_clip.close()
+    if headline_clip:
+        headline_clip.close()
 
 def send_telegram_notification(video_path, headline, credits, generated_caption, video_id):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -224,7 +260,7 @@ def main():
         video_file, video_id, credits, headline, generated_caption = get_reel_by_url(reel_url)
 
         if video_file:
-            process_video_canvas(video_file, "final_feedity.mp4")
+            process_video_canvas(video_file, headline, "final_feedity.mp4")
             send_telegram_notification("final_feedity.mp4", headline, credits, generated_caption, video_id)
             save_processed_id(video_id)
             print("✅ Procés finalitzat amb èxit!")
