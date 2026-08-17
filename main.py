@@ -143,23 +143,66 @@ def get_reel_by_url(reel_url):
     return downloaded_path, video_id, credits, headline, generated_caption
 
     
-def crop_content_bounding_box(video_path):
-    cap = cv2.VideoCapture(video_path)
-    ret, frame = cap.read()
-    cap.release()
-    
-    if not ret:
+def _sample_frames_grayscale_from_clip(clip, num_samples=10):
+    """Mostreja ~num_samples fotogrames repartits per la durada del clip, en escala de grisos.
+
+    S'utilitza moviepy (clip.get_frame(t)) i no cv2.VideoCapture per mostrejar
+    per TEMPS en lloc de per ÍNDEX de fotograma. Els vídeos d'Instagram solen
+    portar frame rate variable (VFR), i amb VFR el CAP_PROP_FRAME_COUNT que
+    reporta OpenCV pot ser molt més alt que els fotogrames reals que té el
+    fitxer: si hi confiéssim per calcular el 'salt' entre mostres, la lectura
+    s'acabaria abans d'arribar a la majoria de fotogrames objectiu i només
+    obtindríem 0 o 1 mostra útil (per això no es detectava cap crop)."""
+    duration = clip.duration
+    if not duration or duration <= 0:
+        return []
+
+    # Marge petit als extrems per evitar problemes de fotograma final inexistent
+    safe_end = max(duration - 0.05, 0)
+    timestamps = np.linspace(0, safe_end, num=num_samples)
+
+    frames = []
+    for t in timestamps:
+        try:
+            frame = clip.get_frame(t)
+        except Exception:
+            continue
+        frames.append(cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY).astype(np.float32))
+    return frames
+
+
+def crop_content_bounding_box(clip, std_threshold=6.0):
+    """Detecta la zona real de contingut d'un vídeo a partir d'un clip de moviepy.
+
+    En lloc de buscar marcs negres (que no serveix quan el "marc" és blanc,
+    o quan porta text incrustat del creador original), es compara la
+    variació de cada píxel entre diversos fotogrames repartits pel vídeo.
+    El contingut real es mou (soroll de vídeo, persones, escenari...);
+    el fons i qualsevol text/marca d'aigua estàtics no. Això permet aïllar
+    el rectangle amb activitat real independentment del color del fons.
+    """
+    frames = _sample_frames_grayscale_from_clip(clip)
+    if len(frames) < 2:
         return None
 
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    _, thresh = cv2.threshold(gray, 15, 255, cv2.THRESH_BINARY)
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    if contours:
-        c = max(contours, key=cv2.contourArea)
-        x, y, w, h = cv2.boundingRect(c)
-        return (x, y, w, h)
-    return None
+    stacked = np.stack(frames, axis=0)
+    variance_map = stacked.std(axis=0)
+
+    mask = (variance_map > std_threshold).astype(np.uint8) * 255
+    # Neteja la màscara: tanca petits forats i elimina soroll aïllat
+    kernel = np.ones((21, 21), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+
+    c = max(contours, key=cv2.contourArea)
+    x, y, w, h = cv2.boundingRect(c)
+    return (x, y, w, h)
+
+
 
 def build_headline_clip(headline, duration, canvas_width=1080):
     """Crea el TextClip del titular que es "crema" a sobre del vídeo."""
@@ -189,13 +232,25 @@ def build_headline_clip(headline, duration, canvas_width=1080):
 
 def process_video_canvas(input_path, headline, output_path="final_feedity.mp4"):
     clip = VideoFileClip(input_path)
-    bbox = crop_content_bounding_box(input_path)
-    
-    if bbox and bbox[2] > 100 and bbox[3] > 100:
+    frame_w, frame_h = clip.size
+    bbox = crop_content_bounding_box(clip)
+
+    # Exigim que el contingut detectat sigui una part significativa del fotograma
+    # (evita retallar per un fals positiu minúscul de la detecció de moviment).
+    min_area_ratio = 0.10
+    if bbox and (bbox[2] * bbox[3]) >= min_area_ratio * frame_w * frame_h:
         x, y, w, h = bbox
-        print(f"✂️ Crop aplicat: x={x}, y={y}, w={w}, h={h}")
-        cropped_clip = clip.cropped(x1=x, y1=y, x2=x+w, y2=y+h)
+        # Marge de seguretat del 2% per si la detecció talla massa just als límits
+        margin_x = int(w * 0.02)
+        margin_y = int(h * 0.02)
+        x1 = max(0, x - margin_x)
+        y1 = max(0, y - margin_y)
+        x2 = min(frame_w, x + w + margin_x)
+        y2 = min(frame_h, y + h + margin_y)
+        print(f"✂️ Crop aplicat: x={x1}, y={y1}, x2={x2}, y2={y2}")
+        cropped_clip = clip.cropped(x1=x1, y1=y1, x2=x2, y2=y2)
     else:
+        print("ℹ️ No s'ha detectat cap zona de contingut clarament diferenciada, no s'aplica crop.")
         cropped_clip = clip
 
     scaled_clip = cropped_clip.resized(width=1080)
