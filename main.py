@@ -4,7 +4,7 @@ import json
 import numpy as np
 import cv2
 import ollama
-from moviepy.editor import VideoFileClip, TextClip, CompositeVideoClip
+from moviepy import VideoFileClip, TextClip, CompositeVideoClip
 
 def _sample_frames_grayscale_from_clip(clip, num_samples=10):
     """Extreu fotogrames distribuïts uniformement en escala de grises."""
