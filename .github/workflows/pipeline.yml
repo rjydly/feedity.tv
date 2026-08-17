@@ -1,55 +1,53 @@
-name: Feedity Reel Processing Pipeline
+name: Feedity Video Pipeline
 
 on:
   schedule:
-    # S'executa cada 6 hores automàticament
-    - cron: '0 */6 * * *'
-  workflow_dispatch: # Permet l'execució manual des de la pestanya Actions
+    - cron: '0 */6 * * *'  # S'executa cada 6 hores
+  workflow_dispatch:        # Permet execució manual des de la pestanya Actions de GitHub
 
 jobs:
-  process-reels:
+  build-and-process:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v3
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-          cache: 'pip'
 
-      - name: Install System Dependencies (FFmpeg & OpenCV)
+      - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg libgl1 libglx-mesa0 libglib2.0-0 fonts-dejavu-core
+          sudo apt-get install -y ffmpeg libsm6 libxext6
 
       - name: Install Python Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Install and Start Ollama Service
+      - name: Install Ollama & Pull Gemma 2 Model
         run: |
           curl -fsSL https://ollama.com/install.sh | sh
           ollama serve &
           sleep 5
           ollama pull gemma2
 
-      - name: Run Main Processing Script
+      - name: Run Main Script
         env:
+          PYTHONUNBUFFERED: "1"
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # Opcional: si Instagram comença a exigir sessió (login required / rate-limit),
-          # crea un secret amb el contingut d'un cookies.txt i descomenta la línia següent.
-          # INSTAGRAM_COOKIES_FILE: cookies.txt
-        run: |
-          python main.py
+          INSTAGRAM_COOKIES_FILE: ${{ secrets.INSTAGRAM_COOKIES_FILE }}
+        run: python main.py
 
-      - name: Commit and Push Processed Video History
+      - name: Commit and Push Processed IDs
+        if: always()
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
           git add processed_videos.json || true
-          git diff --quiet && git diff --staged --quiet || (git commit -m "update: add processed video id" && git push)
+          git commit -m "Update processed videos history [skip ci]" || true
+          git push || true
