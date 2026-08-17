@@ -295,49 +295,44 @@ def process_video_canvas(input_path, headline, output_path="final_feedity.mp4"):
     frame_w, frame_h = clip.size
     bbox = crop_content_bounding_box(clip)
 
-    min_area_ratio = 0.10
+    min_area_ratio = 0.05
     if bbox and (bbox[2] * bbox[3]) >= min_area_ratio * frame_w * frame_h:
         x, y, w, h = bbox
-        margin_x = int(w * 0.02)
-        margin_y = int(h * 0.02)
-        x1 = max(0, x - margin_x)
-        y1 = max(0, y - margin_y)
-        x2 = min(frame_w, x + w + margin_x)
-        y2 = min(frame_h, y + h + margin_y)
-        cropped_clip = clip.cropped(x1=x1, y1=y1, x2=x2, y2=y2)
+        print(f"✂️ Crop detectat: x={x}, y={y}, w={w}, h={h}")
+        cropped_clip = clip.cropped(x1=x, y1=y, x2=x + w, y2=y + h)
     else:
         cropped_clip = clip
 
-    scaled_clip = cropped_clip.resized(width=1000)
+    # Ajustat a 1080 per utilitzar l'amplada completa del canvas
+    scaled_clip = cropped_clip.resized(width=1080)
 
-    # Crea el fons (fàcil de canviar amb la variable CANVAS_BG_COLOR)
     bg_clip = ColorClip(size=(CANVAS_WIDTH, CANVAS_HEIGHT), color=CANVAS_BG_COLOR, duration=clip.duration)
-
     layers = [bg_clip]
 
-    if headline:
-        header_img_path, card_h = generate_header_card_image(headline, width=1000)
-        header_clip = (
-            ImageClip(header_img_path)
-            .with_duration(clip.duration)
-            .with_position(("center", 180))
-        )
-        layers.append(header_clip)
-        video_y_pos = 180 + card_h + 30
-    else:
-        video_y_pos = 300
+    # Fallback si Gemma no retorna cap headline
+    final_headline = headline if headline.strip() else "<b>Feedity</b> Media"
 
+    header_img_path, card_h = generate_header_card_image(final_headline, width=1000)
+    header_clip = (
+        ImageClip(header_img_path)
+        .with_duration(clip.duration)
+        .with_position(("center", 140))
+    )
+    layers.append(header_clip)
+
+    # Posiciona el vídeo immediatament a sota del header
+    video_y_pos = 140 + card_h + 20
     scaled_clip = scaled_clip.with_position(("center", video_y_pos))
     layers.append(scaled_clip)
 
     final_clip = CompositeVideoClip(layers, size=(CANVAS_WIDTH, CANVAS_HEIGHT))
     final_clip.write_videofile(output_path, codec="libx264", audio_codec="aac")
-    
+
     clip.close()
     cropped_clip.close()
     final_clip.close()
-
-def send_telegram_notification(video_path, headline, credits, generated_caption, video_id):
+    
+    def send_telegram_notification(video_path, headline, credits, generated_caption, video_id):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("⚠️ Notificació de Telegram omessa.")
         return
