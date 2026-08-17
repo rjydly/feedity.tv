@@ -174,26 +174,39 @@ def _sample_frames_grayscale_from_clip(clip, num_samples=10):
             continue
     return frames
 
-def crop_content_bounding_box(clip, std_threshold=6.0):
+def crop_content_bounding_box(clip, std_threshold=4.0):
+    """Detecta el contingut i elimina tant marcs negres estàtics com àrees sense moviment."""
     frames = _sample_frames_grayscale_from_clip(clip)
     if len(frames) < 2:
         return None
 
+    # 1. Filtre per eliminar negre pur/fosc de les vores
     stacked = np.stack(frames, axis=0)
+    mean_frame = stacked.mean(axis=0)
+    _, black_mask = cv2.threshold(mean_frame.astype(np.uint8), 15, 255, cv2.THRESH_BINARY)
+
+    # 2. Màscara de moviment
     variance_map = stacked.std(axis=0)
+    motion_mask = (variance_map > std_threshold).astype(np.uint8) * 255
 
-    mask = (variance_map > std_threshold).astype(np.uint8) * 255
-    kernel = np.ones((21, 21), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    # Combinem les dues màscares
+    combined_mask = cv2.bitwise_and(black_mask, motion_mask)
 
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    kernel = np.ones((15, 15), np.uint8)
+    combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
+    combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel)
+
+    contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
-        return None
+        # Si no detecta moviment, almenys retallem el marc negre
+        contours, _ = cv2.findContours(black_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
 
     c = max(contours, key=cv2.contourArea)
     x, y, w, h = cv2.boundingRect(c)
     return (x, y, w, h)
+
 
 def generate_header_card_image(headline_html, width=960):
     """Crea una imatge amb el logo, Feedity, @feedity.tv i el text amb la font Lexend i etiquetes <b>."""
