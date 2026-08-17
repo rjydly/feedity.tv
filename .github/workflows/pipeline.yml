@@ -23,12 +23,12 @@ jobs:
       - name: Install System Dependencies (FFmpeg & OpenCV)
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg libgl1-mesa-glx
+          sudo apt-get install -y ffmpeg libgl1 libglx-mesa0 libglib2.0-0
 
       - name: Install Python Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install apify-client>=1.8.0 opencv-python-headless>=4.8.0 pillow>=10.0.0 moviepy>=2.0.0 requests>=2.31.0 ollama>=0.1.0 numpy>=1.24.0
+          pip install -r requirements.txt
 
       - name: Install and Start Ollama Service
         run: |
@@ -39,9 +39,11 @@ jobs:
 
       - name: Run Main Processing Script
         env:
-          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Opcional: si Instagram comença a exigir sessió (login required / rate-limit),
+          # crea un secret amb el contingut d'un cookies.txt i descomenta la línia següent.
+          # INSTAGRAM_COOKIES_FILE: cookies.txt
         run: |
           python main.py
 
