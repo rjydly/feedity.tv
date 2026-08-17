@@ -70,15 +70,24 @@ def save_processed_id(video_id):
 
 def analyze_caption_with_local_ai(caption):
     prompt = f"""
-    Analitza aquesta descripció de xarxes socials i genera:
-    1. Els crèdits o l'autor original del vídeo (p. ex., @usuari). Si no s'identifica o no existeix, posa "Unknown".
-    2. Un títol o headline. Utilitza etiquetes <b> i </b> per marcar les paraules o frases clau que s'han de posar en NEGRETA, tal com els mims o piulades d'Instagram/Twitter.
-    3. Una descripció (caption) llarga, detallada i ben estructurada per a la publicació d'Instagram, amb ganxo inicial, explicació del tema, crida a l'acció (CTA) i hashtags virals. NO incloguis els crèdits dins d'aquest camp de caption.
+    Ets el redactor principal del compte de xarxes socials @feedity.tv.
+    Analitza la següent descripció original d'un vídeo i genera el contingut requerit.
 
     Descripció original: "{caption}"
 
-    Respon NOMÉS en format JSON vàlid com aquest:
-    {{"credits": "@usuari", "headline": "Això és un <b>text impactant</b> en negreta", "generated_caption": "Texto largo y detallado para Instagram..."}}
+    INSTRUCCIONS STRICTES:
+    1. **credits**: Extreu el compte d'usuari de l'autor original (ex: @creador). Si no s'esmenta explicitament, posa "Unknown".
+    2. **headline**: Crea UN TITULAR CURT i IMPACTANT (màxim 8-10 paraules). Utilitza etiquetes <b> i </b> per posar en NEGRETA les paraules clau principals. MAI el deixis buit ni posis "Feedity Media".
+    3. **generated_caption**: Escriu un peu de foto viral i atractiu per a Instagram. 
+       - Si hi ha crida a l'acció (CTA) per seguir el compte, USA ÚNICAMENT @feedity.tv (MAI mencionis comptes d'altres com @FBOY o similars).
+       - No escriguis text d'estil Viquipèdia ni resums llargs i avorrits. Fes-ho dinàmic, amb etiquetes i emoticons.
+
+    Respon ÚNICAMENT en format JSON vàlid com aquest:
+    {{
+      "credits": "@usuari",
+      "headline": "Això és un <b>titular impactant</b>",
+      "generated_caption": "Segueix a @feedity.tv per a més contingut! 🍿..."
+    }}
     """
     try:
         response = ollama.chat(
@@ -90,10 +99,16 @@ def analyze_caption_with_local_ai(caption):
         if match:
             data = json.loads(match.group())
             credits = data.get("credits", "Unknown")
-            headline = data.get("headline", "")
-            gen_caption = data.get("generated_caption", "")
+            headline = data.get("headline", "").strip()
+            gen_caption = data.get("generated_caption", "").strip()
             
-            # Només afegim la font al final de tot si l'autor existeix realment
+            # Si el headline segueix buit per error, en generem un per defecte útil
+            if not headline or headline.lower() == "feedity media":
+                headline = "<b>Moment increïble</b> viral"
+
+            # Reemplaçament de seguretat per evitar que es colin altres comptes al CTA
+            gen_caption = re.sub(r'@[A-Za-z0-9_.]+', '@feedity.tv', gen_caption)
+            
             if credits and credits != "Unknown":
                 gen_caption = f"{gen_caption}\n\nVia: {credits}"
                 
@@ -101,7 +116,7 @@ def analyze_caption_with_local_ai(caption):
     except Exception as e:
         print(f"⚠️ Error en analitzar amb Ollama: {e}")
     
-    return "Unknown", "", caption
+    return "Unknown", "<b>Vídeo</b> destacat", f"Segueix a @feedity.tv per a més! 🍿\n\n{caption}"
 
 
 def extract_shortcode(reel_url):
