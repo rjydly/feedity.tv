@@ -1,16 +1,19 @@
 import os
 import re
 import json
+import glob
 import requests
 import numpy as np
 import cv2
 import ollama
-from apify_client import ApifyClient
+import yt_dlp
 from moviepy import VideoFileClip, CompositeVideoClip
 
-APIFY_TOKEN = os.getenv("APIFY_TOKEN")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+# Opcional: ruta a un cookies.txt exportat del navegador, per si Instagram
+# comença a exigir sessió iniciada per servir el vídeo (login required / rate limit).
+INSTAGRAM_COOKIES_FILE = os.getenv("INSTAGRAM_COOKIES_FILE")
 TEST_MODE = False
 
 def load_processed_ids():
@@ -62,72 +65,78 @@ def analyze_caption_with_local_ai(caption):
     
     return "Unknown", "", caption
 
-from apify_client import ApifyClient
+def extract_shortcode(reel_url):
+    """Extreu el shortcode (p.ex. 'CxYz123AbCd') d'una URL de reel/post d'Instagram."""
+    match = re.search(r"instagram\.com/(?:reel|reels|p|tv)/([A-Za-z0-9_-]+)", reel_url)
+    return match.group(1) if match else None
 
-def get_most_viral_video_from_account(account_handle):
+
+def _cleanup_temp_input():
+    """Elimina restes de descàrregues anteriors (temp_input.* de qualsevol extensió)."""
+    for f in glob.glob("temp_input.*"):
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+
+
+def get_reel_by_url(reel_url):
+    """Processa un reel a partir de la seva URL directa (mode semiautomàtic), via yt-dlp."""
     processed_ids = load_processed_ids()
-    clean_handle = account_handle.replace("@", "").strip()
-    
-    print(f"📡 Scraping de Reels de @{clean_handle} via Apify...")
-    
-    client = ApifyClient(APIFY_TOKEN)
-    
-    # Paràmetres d'entrada per a l'actor apify/instagram-reel-scraper
-    run_input = {
-        "username": [clean_handle],
-        "resultsLimit": 15
-    }
-    
-    try:
-        # Cridem a l'actor apify/instagram-reel-scraper
-        run = client.actor("apify/instagram-reel-scraper").call(run_input=run_input)
-        dataset_items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
-    except Exception as e:
-        print(f"❌ Error en executar l'Actor d'Apify: {e}")
+    shortcode = extract_shortcode(reel_url)
+
+    if shortcode and shortcode in processed_ids:
+        print(f"⏭️ Reel ja processat anteriorment ({shortcode}), s'omet.")
         return None, None, None, None, None
 
-    candidates = []
-    for item in dataset_items:
-        video_url = item.get("videoUrl") or item.get("video_url")
-        if not video_url:
-            continue
-            
-        video_id = str(item.get("id") or item.get("shortCode") or item.get("code"))
-        if video_id in processed_ids:
-            continue
-            
-        views = item.get("playCount") or item.get("videoViewCount") or item.get("likeCount") or 0
-        caption_text = item.get("caption") or item.get("text") or ""
-        
-        candidates.append({
-            "id": video_id,
-            "url": video_url,
-            "views": views,
-            "caption": caption_text
-        })
-        
-    print(f"📊 S'han trobat {len(candidates)} Reels potencials no processats.")
-    candidates.sort(key=lambda x: x["views"], reverse=True)
-    
-    for item in candidates:
-        video_id = item["id"]
-        video_url = item["url"]
-        caption_raw = item["caption"]
-        
-        print(f"🔥 Vídeo candidat trobat ({video_id}) amb {item['views']} visualitzacions.")
-        
-        r = requests.get(video_url, stream=True)
-        with open("temp_input.mp4", "wb") as f:
-            for chunk in r.iter_content(chunk_size=1024*1024):
-                if chunk:
-                    f.write(chunk)
-                    
-        print("🤖 Analitzant i generant contingut amb Gemma 2...")
-        credits, headline, generated_caption = analyze_caption_with_local_ai(caption_raw)
-        
-        return "temp_input.mp4", video_id, credits, headline, generated_caption
-        
-    return None, None, None, None, None
+    print(f"⬇️ Descarregant reel amb yt-dlp: {reel_url}")
+
+    _cleanup_temp_input()
+
+    ydl_opts = {
+        "outtmpl": "temp_input.%(ext)s",
+        "format": "mp4/bestvideo+bestaudio/best",
+        "merge_output_format": "mp4",
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+    }
+    if INSTAGRAM_COOKIES_FILE:
+        ydl_opts["cookiefile"] = INSTAGRAM_COOKIES_FILE
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(reel_url, download=True)
+    except yt_dlp.utils.DownloadError as e:
+        print(f"❌ Error en descarregar el reel amb yt-dlp: {e}")
+        print("   💡 Si l'error menciona 'login required' o 'rate-limit', prova a definir "
+              "INSTAGRAM_COOKIES_FILE amb un cookies.txt exportat del navegador.")
+        return None, None, None, None, None
+    except Exception as e:
+        print(f"❌ Error inesperat amb yt-dlp: {e}")
+        return None, None, None, None, None
+
+    video_id = str(info.get("id") or shortcode or reel_url)
+    if video_id in processed_ids:
+        print(f"⏭️ Reel ja processat anteriorment ({video_id}), s'omet.")
+        return None, None, None, None, None
+
+    downloaded_path = ydl.prepare_filename(info)
+    # merge_output_format pot canviar l'extensió final a .mp4
+    if not os.path.exists(downloaded_path):
+        candidates = glob.glob("temp_input.*")
+        downloaded_path = candidates[0] if candidates else None
+
+    if not downloaded_path or not os.path.exists(downloaded_path):
+        print("⚠️ yt-dlp no ha generat cap fitxer de vídeo.")
+        return None, None, None, None, None
+
+    caption_raw = info.get("description") or ""
+
+    print("🤖 Analitzant i generant contingut amb Gemma 2...")
+    credits, headline, generated_caption = analyze_caption_with_local_ai(caption_raw)
+
+    return downloaded_path, video_id, credits, headline, generated_caption
 
     
 def crop_content_bounding_box(video_path):
@@ -205,12 +214,15 @@ def main():
         return
 
     with open("sources.csv", "r") as f:
-        accounts = [line.strip() for line in f if line.strip() and not line.startswith("account_handle")]
+        reel_urls = [
+            line.strip() for line in f
+            if line.strip() and not line.startswith("reel_url") and not line.startswith("account_handle")
+        ]
 
-    for account in accounts:
-        print(f"\n🚀 Processant compte: {account}")
-        video_file, video_id, credits, headline, generated_caption = get_most_viral_video_from_account(account)
-        
+    for reel_url in reel_urls:
+        print(f"\n🚀 Processant reel: {reel_url}")
+        video_file, video_id, credits, headline, generated_caption = get_reel_by_url(reel_url)
+
         if video_file:
             process_video_canvas(video_file, "final_feedity.mp4")
             send_telegram_notification("final_feedity.mp4", headline, credits, generated_caption, video_id)
@@ -218,7 +230,7 @@ def main():
             print("✅ Procés finalitzat amb èxit!")
             break
         else:
-            print(f"⚠️ No s'han trobat nous vídeos no processats per a {account}.")
+            print(f"⚠️ Reel omès o sense contingut nou: {reel_url}")
 
 if __name__ == "__main__":
     main()
