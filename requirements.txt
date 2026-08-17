@@ -1,4 +1,4 @@
-apify-client>=1.8.0
+yt-dlp>=2024.8.1
 opencv-python-headless>=4.8.0
 pillow>=10.0.0
 moviepy>=2.0.0
