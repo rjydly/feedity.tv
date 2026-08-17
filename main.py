@@ -68,26 +68,36 @@ def save_processed_id(video_id):
 
 
 def analyze_caption_with_local_ai(caption):
-    """Genera contingut en anglès amb Gemma 2, titulars amb negretes i evita CTAs aliens."""
+    """
+    Prompt millorat amb exemples (Few-Shot Prompting) per obtenir títols
+    virals, moderns, amb slang de xarxes i etiquetes de negreta ben aplicades.
+    """
     prompt = f"""
-    You are the head social media copywriter for @feedity.tv.
-    Analyze the following raw video caption and generate the requested fields.
+    You are the lead social media copywriter for @feedity.tv, a viral media brand.
+    Analyze the raw video caption below and generate a modern, engaging headline and Instagram post.
 
     Raw caption: "{caption}"
 
     STRICT INSTRUCTIONS:
     1. **LANGUAGE**: ALL generated content MUST be written strictly in ENGLISH.
-    2. **credits**: Extract the original creator's social handle (e.g., @creator). If not explicitly mentioned, return "Unknown".
-    3. **headline**: Create ONE SHORT, IMPACTFUL HEADLINE in ENGLISH (max 6-8 words). Use <b> and </b> tags around the main keywords to make them BOLD. NEVER leave this blank, NEVER return "Feedity Media", and NEVER leave it empty.
-    4. **generated_caption**: Write an engaging, viral Instagram caption in ENGLISH.
-       - For any Call to Action (CTA) asking users to follow, ONLY use @feedity.tv (NEVER mention third-party accounts like @FBOY or others).
-       - Keep it snappy and engaging, using relevant emojis and trending English hashtags. Do NOT write long Wikipedia-style summaries.
+    2. **credits**: Extract the original creator's handle (e.g. @creator). Return "Unknown" if not found.
+    3. **headline**: Create a 10 to 16-word VIRAL HEADLINE for the top video header.
+       - Style: Use current brainrot/internet slang, clickbait, or relatable hooks (e.g. "bro thought", "no way he actually", "living rent free", "insane plot twist", "nah this is crazy").
+       - Format: Wrap the MOST IMPORTANT words in <b> and </b> tags so they get rendered in BOLD.
+       - NEVER leave it blank and NEVER output generic titles like "Viral moment".
+    4. **generated_caption**: Write a short, engaging Instagram caption with emojis and trending hashtags. Use ONLY @feedity.tv for CTAs.
 
-    Respond ONLY with a valid JSON object matching this schema:
+    EXAMPLES OF GOOD HEADLINES:
+    - "Bro really thought he could <b>get away with this</b> live on national TV 💀"
+    - "Nah this <b>plot twist</b> caught everyone completely off guard 😭"
+    - "This core memory will live <b>rent free in my head</b> forever"
+    - "She literally unlocked a <b>hidden side quest</b> during the audition 💀"
+
+    Respond ONLY with a valid JSON object:
     {{
       "credits": "@username",
-      "headline": "This is a <b>viral headline</b>",
-      "generated_caption": "Follow @feedity.tv for more viral clips! 🍿..."
+      "headline": "Bro really thought he could <b>get away with this</b> 💀",
+      "generated_caption": "Wait for the end! 🍿 Follow @feedity.tv for more viral clips!\n\n#viral #funny"
     }}
     """
     try:
@@ -103,8 +113,8 @@ def analyze_caption_with_local_ai(caption):
             headline = data.get("headline", "").strip()
             gen_caption = data.get("generated_caption", "").strip()
             
-            if not headline or headline.lower() in ["feedity media", "<b>feedity</b> media"]:
-                headline = "<b>Viral</b> moment"
+            if not headline or "feedity" in headline.lower():
+                headline = "Nah this <b>unbelievable moment</b> caught everyone off guard 💀"
 
             gen_caption = re.sub(r'@[A-Za-z0-9_.]+', '@feedity.tv', gen_caption)
             
@@ -115,8 +125,7 @@ def analyze_caption_with_local_ai(caption):
     except Exception as e:
         print(f"⚠️ Error analitzant amb Ollama: {e}", flush=True)
     
-    return "Unknown", "<b>Featured</b> clip", f"Follow @feedity.tv for more! 🍿\n\n{caption}"
-
+    return "Unknown", "Bro really thought he could <b>pull this off</b> live on camera 💀", f"Follow @feedity.tv for more! 🍿\n\n{caption}"
 
 def extract_shortcode(reel_url):
     match = re.search(r"instagram\.com/(?:reel|reels|p|tv)/([A-Za-z0-9_-]+)", reel_url)
@@ -291,34 +300,43 @@ def crop_content_bounding_box(clip):
 
 
 def generate_header_card_image(headline_html, width=960):
-    """Crea la capçalera estil Postureo amb la font Lexend."""
+    """
+    Renderitzador de capçaleres amb parsejador de negretes HTML (<b>...</b>) millorat
+    i salt de línia dinàmic amb la font Lexend.
+    """
     setup_fonts()
 
     font_name = ImageFont.truetype(LEXEND_BOLD_PATH, 36)
     font_handle = ImageFont.truetype(LEXEND_REGULAR_PATH, 28)
-    font_text_reg = ImageFont.truetype(LEXEND_REGULAR_PATH, 42)
-    font_text_bold = ImageFont.truetype(LEXEND_BOLD_PATH, 42)
+    
+    # Mida de font principal per al títol
+    font_size = 38
+    font_text_reg = ImageFont.truetype(LEXEND_REGULAR_PATH, font_size)
+    font_text_bold = ImageFont.truetype(LEXEND_BOLD_PATH, font_size)
 
-    logo_size = 100
+    logo_size = 90
     if os.path.exists(LOGO_PATH):
         logo_img = Image.open(LOGO_PATH).convert("RGBA")
         logo_img = logo_img.resize((logo_size, logo_size), Image.Resampling.LANCZOS)
     else:
         logo_img = Image.new("RGBA", (logo_size, logo_size), (200, 200, 200, 255))
 
+    # Parsejador d'etiquetes <b> i </b>
     tokens = []
-    parts = re.split(r'(<b>.*?</b>)', headline_html)
-    for part in parts:
-        if part.startswith("<b>") and part.endswith("</b>"):
-            clean_text = part[3:-4]
-            words = clean_text.split(" ")
-            for w in words:
-                if w: tokens.append((w, True))
+    # Divideix mantenint la distinció de si està dins d'un <b> o no
+    raw_segments = re.split(r'(<b>.*?</b>)', headline_html, flags=re.IGNORECASE)
+    for segment in raw_segments:
+        if not segment:
+            continue
+        if segment.lower().startswith("<b>") and segment.lower().endswith("</b>"):
+            clean_text = segment[3:-4]
+            for w in clean_text.split():
+                tokens.append((w, True))
         else:
-            words = part.split(" ")
-            for w in words:
-                if w: tokens.append((w, False))
+            for w in segment.split():
+                tokens.append((w, False))
 
+    # Calculador de salts de línia per evitar que el text surti de la imatge
     lines = []
     current_line = []
     current_w = 0
@@ -327,27 +345,29 @@ def generate_header_card_image(headline_html, width=960):
     for word, is_bold in tokens:
         f = font_text_bold if is_bold else font_text_reg
         w_len = f.getlength(word)
-        if current_w + w_len > width - 40:
-            lines.append(current_line)
+        if current_w + w_len > (width - 40):
+            if current_line:
+                lines.append(current_line)
             current_line = [(word, is_bold)]
             current_w = w_len + space_w
         else:
             current_line.append((word, is_bold))
             current_w += w_len + space_w
+            
     if current_line:
         lines.append(current_line)
 
-    line_height = 54
+    line_height = 50
     text_section_h = len(lines) * line_height
-    header_h = 130
-    total_h = header_h + text_section_h + 30
+    header_h = 110
+    total_h = header_h + text_section_h + 20
 
     final_card = Image.new("RGBA", (width, total_h), (0, 0, 0, 0))
     final_card.paste(logo_img, (10, 10), logo_img)
 
     draw = ImageDraw.Draw(final_card)
-    draw.text((130, 20), "Feedity", font=font_name, fill=(255, 255, 255, 255))
-    draw.text((130, 68), "@feedity.tv", font=font_handle, fill=(160, 160, 160, 255))
+    draw.text((120, 15), "Feedity", font=font_name, fill=(255, 255, 255, 255))
+    draw.text((120, 60), "@feedity.tv", font=font_handle, fill=(160, 160, 160, 255))
 
     y_cursor = header_h
     for line in lines:
