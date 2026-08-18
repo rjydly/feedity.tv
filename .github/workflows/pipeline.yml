@@ -2,14 +2,14 @@ name: Feedity Video Pipeline
 
 on:
   schedule:
-    - cron: '0 */6 * * *'
-  workflow_dispatch:
+    - cron: '0 */6 * * *'  # S'executa automàticament cada 6 hores
+  workflow_dispatch:        # Permet l'execució manual des de la pestanya Actions
 
 jobs:
   build-and-process:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write       # Permís necessari per fer commit i push de processed_videos.json
 
     steps:
       - name: Checkout Repository
