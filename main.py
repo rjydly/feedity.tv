@@ -17,8 +17,8 @@ from moviepy import VideoFileClip, CompositeVideoClip, ImageClip
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 INSTAGRAM_COOKIES_FILE = os.getenv("INSTAGRAM_COOKIES_FILE")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TEST_MODE = True  # Mode de proves activat
 
 # Rutes de recursos
@@ -197,7 +197,44 @@ def parse_json_safely(raw_text):
     return None
 
 
+def analyze_with_gemini_vision(image_pil, caption_raw=""):
+    """Anàlisi principal amb Google Gemini."""
+    from google import genai
+    from google.genai import types
+    
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    prompt = AI_PROMPT_INSTRUCTIONS
+    
+    contents = [prompt]
+    if image_pil is not None:
+        contents.append(image_pil)
+    if caption_raw:
+        contents.append(f"\nOriginal post description: {caption_raw}")
+
+    candidate_models = ["gemini-3.6-flash", "gemini-2.0-flash", "gemini-2.5-flash"]
+    for model_name in candidate_models:
+        try:
+            print(f"🧠 [Gemini] Provant model {model_name}...")
+            res = client.models.generate_content(
+                model=model_name,
+                contents=contents,
+                config=types.GenerateContentConfig(response_mime_type="application/json")
+            )
+            data = parse_json_safely(res.text)
+            if data and data.get("tweet_text"):
+                return (
+                    data.get("credits", ""),
+                    clean_tweet_text(data.get("tweet_text", "")),
+                    format_final_caption(data.get("generated_caption", ""))
+                )
+        except Exception as e:
+            print(f"ℹ️ Gemini error ({model_name}): {e}")
+            continue
+    return None
+
+
 def analyze_with_groq_vision(image_pil, caption_raw=""):
+    """Fallback amb Groq Vision si Gemini falla o està saturat."""
     from groq import Groq
     client = Groq(api_key=GROQ_API_KEY)
 
@@ -220,7 +257,7 @@ def analyze_with_groq_vision(image_pil, caption_raw=""):
 
     for model_name in candidate_models:
         try:
-            print(f"🧠 Provant Groq Vision ({model_name})...")
+            print(f"🧠 [Groq Fallback] Provant model {model_name}...")
             completion = client.chat.completions.create(
                 model=model_name,
                 messages=[{"role": "user", "content": content}],
@@ -236,41 +273,6 @@ def analyze_with_groq_vision(image_pil, caption_raw=""):
                 )
         except Exception as e:
             print(f"ℹ️ Groq error ({model_name}): {e}")
-            continue
-    return None
-
-
-def analyze_with_gemini_vision(image_pil, caption_raw=""):
-    from google import genai
-    from google.genai import types
-    
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    prompt = AI_PROMPT_INSTRUCTIONS
-    
-    contents = [prompt]
-    if image_pil is not None:
-        contents.append(image_pil)
-    if caption_raw:
-        contents.append(f"\nOriginal post description: {caption_raw}")
-
-    candidate_models = ["gemini-3.6-flash", "gemini-2.0-flash"]
-    for model_name in candidate_models:
-        try:
-            print(f"🧠 Provant Gemini ({model_name})...")
-            res = client.models.generate_content(
-                model=model_name,
-                contents=contents,
-                config=types.GenerateContentConfig(response_mime_type="application/json")
-            )
-            data = parse_json_safely(res.text)
-            if data and data.get("tweet_text"):
-                return (
-                    data.get("credits", ""),
-                    clean_tweet_text(data.get("tweet_text", "")),
-                    format_final_caption(data.get("generated_caption", ""))
-                )
-        except Exception as e:
-            print(f"ℹ️ Gemini error ({model_name}): {e}")
             continue
     return None
 
@@ -300,16 +302,22 @@ def send_telegram_alert(error_detail, reel_url=""):
 
 
 def analyze_content_with_retry(image_pil, caption_raw="", reel_url="", max_retries=5, delay_seconds=60):
+    """
+    Executa primer Gemini per defecte. Si falla o està saturat, prova Groq.
+    Si ambdues fallen, espera 60 segons i reintenta fins a 5 vegades.
+    """
     for attempt in range(1, max_retries + 1):
         print(f"\n🤖 [Intent {attempt}/{max_retries}] Analitzant contingut visual i text amb IA...")
 
-        if GROQ_API_KEY:
-            res = analyze_with_groq_vision(image_pil, caption_raw)
+        # 1. Prioritat absoluta: Google Gemini
+        if GEMINI_API_KEY:
+            res = analyze_with_gemini_vision(image_pil, caption_raw)
             if res:
                 return res
 
-        if GEMINI_API_KEY:
-            res = analyze_with_gemini_vision(image_pil, caption_raw)
+        # 2. Pla B: Groq Vision
+        if GROQ_API_KEY:
+            res = analyze_with_groq_vision(image_pil, caption_raw)
             if res:
                 return res
 
@@ -318,7 +326,7 @@ def analyze_content_with_retry(image_pil, caption_raw="", reel_url="", max_retri
             time.sleep(delay_seconds)
 
     print(f"❌ La IA no ha respost després de {max_retries} intents.")
-    send_telegram_alert("Totes les APIs de visió (Groq i Gemini) han fallat per saturació persistent.", reel_url)
+    send_telegram_alert("Totes les APIs de visió (Gemini i Groq) han fallat per saturació persistent.", reel_url)
     return None, None, None
 
 
@@ -394,7 +402,7 @@ def create_tweet_header_image(tweet_text, width=1080):
     margin_x = 75
     max_text_width = width - (margin_x * 2)
 
-    # Tipografies Plus Jakarta Sans amb la nova mida ampliada
+    # Tipografies Plus Jakarta Sans ampliades
     name_font = get_jakarta_font("semibold", size=48)
     handle_font = get_jakarta_font("regular", size=38)
     body_font_regular = get_jakarta_font("regular", size=44)
@@ -416,7 +424,7 @@ def create_tweet_header_image(tweet_text, width=1080):
         else:
             body_height += line_height
 
-    # Mida de l'avatar augmentada
+    # Mida de l'avatar (110px)
     avatar_size = 110
     top_padding = 50
     bottom_padding = 40
@@ -425,7 +433,7 @@ def create_tweet_header_image(tweet_text, width=1080):
     img = Image.new("RGBA", (width, header_height), (0, 0, 0, 255))
     draw = ImageDraw.Draw(img)
 
-    # 1. Avatar Circular Ampliat (110px)
+    # 1. Avatar Circular Ampliat
     avatar_x = margin_x
     avatar_y = top_padding
 
@@ -442,12 +450,12 @@ def create_tweet_header_image(tweet_text, width=1080):
         draw.ellipse([avatar_x, avatar_y, avatar_x + avatar_size, avatar_y + avatar_size], fill=(22, 24, 28))
         draw.text((avatar_x + 32, avatar_y + 20), "F", font=name_font, fill=(245, 200, 30))
 
-    # 2. Nom i Username Ampliats
+    # 2. Nom i Username
     text_start_x = avatar_x + avatar_size + 24
     draw.text((text_start_x, avatar_y + 6), "Feedity", font=name_font, fill=(255, 255, 255))
     draw.text((text_start_x, avatar_y + 58), "@feedity.tv", font=handle_font, fill=(113, 118, 123))
 
-    # 3. Dibuix del Cos del Tweet
+    # 3. Cos del Tweet
     text_y = avatar_y + avatar_size + 36
     space_w = dummy_draw.textbbox((0, 0), " ", font=body_font_regular)[2]
 
@@ -593,7 +601,7 @@ def process_video_canvas(input_path, tweet_text, output_path="final_feedity.mp4"
 
     header_clip = ImageClip(header_img_np).with_duration(scaled_clip.duration)
 
-    # Posicionament: Capçalera a dalt, vídeo just a sota
+    # Posicionament
     header_clip = header_clip.with_position(("center", 180))
     video_y_pos = 180 + header_h + 10
     video_positioned = scaled_clip.with_position(("center", video_y_pos))
@@ -615,7 +623,7 @@ def process_video_canvas(input_path, tweet_text, output_path="final_feedity.mp4"
 
 
 # ==========================================
-# NOTIFICACIÓ TELEGRAM (ENVIAMENT EN 2 MISSATGES)
+# NOTIFICACIÓ TELEGRAM
 # ==========================================
 
 def send_telegram_notification(video_path, tweet_text, credits, generated_caption, video_id):
@@ -732,7 +740,7 @@ def get_reel_by_url(reel_url):
 
     caption_raw = info.get("description") or ""
 
-    # Extracció del fotograma i anàlisi amb bucle de 5 reintents
+    # Extracció del fotograma i anàlisi (Gemini primer -> Groq fallback)
     frame_image = extract_frame_as_image(downloaded_path, timestamp=0.5)
     credits, tweet_text, generated_caption = analyze_content_with_retry(
         frame_image, 
