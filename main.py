@@ -221,7 +221,6 @@ def analyze_with_groq_vision(image_pil, caption_raw=""):
     for model_name in candidate_models:
         try:
             print(f"🧠 Provant Groq Vision ({model_name})...")
-            # Provem primer sense forçar mode json rígid per evitar errors 400 de validació
             completion = client.chat.completions.create(
                 model=model_name,
                 messages=[{"role": "user", "content": content}],
@@ -301,10 +300,6 @@ def send_telegram_alert(error_detail, reel_url=""):
 
 
 def analyze_content_with_retry(image_pil, caption_raw="", reel_url="", max_retries=5, delay_seconds=60):
-    """
-    Intenta analitzar el contingut amb Groq i Gemini.
-    Si fallen (ex: error 503 de saturació), s'espera 1 minut i torna a provar fins a 5 vegades.
-    """
     for attempt in range(1, max_retries + 1):
         print(f"\n🤖 [Intent {attempt}/{max_retries}] Analitzant contingut visual i text amb IA...")
 
@@ -399,8 +394,9 @@ def create_tweet_header_image(tweet_text, width=1080):
     margin_x = 75
     max_text_width = width - (margin_x * 2)
 
-    name_font = get_jakarta_font("semibold", size=38)
-    handle_font = get_jakarta_font("regular", size=32)
+    # Tipografies Plus Jakarta Sans amb la nova mida ampliada
+    name_font = get_jakarta_font("semibold", size=48)
+    handle_font = get_jakarta_font("regular", size=38)
     body_font_regular = get_jakarta_font("regular", size=44)
     body_font_bold = get_jakarta_font("bold", size=44)
 
@@ -420,15 +416,16 @@ def create_tweet_header_image(tweet_text, width=1080):
         else:
             body_height += line_height
 
-    avatar_size = 86
+    # Mida de l'avatar augmentada
+    avatar_size = 110
     top_padding = 50
     bottom_padding = 40
-    header_height = top_padding + avatar_size + 30 + body_height + bottom_padding
+    header_height = top_padding + avatar_size + 36 + body_height + bottom_padding
 
     img = Image.new("RGBA", (width, header_height), (0, 0, 0, 255))
     draw = ImageDraw.Draw(img)
 
-    # 1. Avatar Circular
+    # 1. Avatar Circular Ampliat (110px)
     avatar_x = margin_x
     avatar_y = top_padding
 
@@ -443,15 +440,15 @@ def create_tweet_header_image(tweet_text, width=1080):
             print(f"⚠️ Error carregant el logo: {e}")
     else:
         draw.ellipse([avatar_x, avatar_y, avatar_x + avatar_size, avatar_y + avatar_size], fill=(22, 24, 28))
-        draw.text((avatar_x + 24, avatar_y + 14), "F", font=name_font, fill=(245, 200, 30))
+        draw.text((avatar_x + 32, avatar_y + 20), "F", font=name_font, fill=(245, 200, 30))
 
-    # 2. Nom i Username
-    text_start_x = avatar_x + avatar_size + 20
-    draw.text((text_start_x, avatar_y + 4), "Feedity", font=name_font, fill=(255, 255, 255))
-    draw.text((text_start_x, avatar_y + 46), "@feedity.tv", font=handle_font, fill=(113, 118, 123))
+    # 2. Nom i Username Ampliats
+    text_start_x = avatar_x + avatar_size + 24
+    draw.text((text_start_x, avatar_y + 6), "Feedity", font=name_font, fill=(255, 255, 255))
+    draw.text((text_start_x, avatar_y + 58), "@feedity.tv", font=handle_font, fill=(113, 118, 123))
 
-    # 3. Cos del Tweet
-    text_y = avatar_y + avatar_size + 30
+    # 3. Dibuix del Cos del Tweet
+    text_y = avatar_y + avatar_size + 36
     space_w = dummy_draw.textbbox((0, 0), " ", font=body_font_regular)[2]
 
     for line in wrapped_lines:
@@ -596,7 +593,7 @@ def process_video_canvas(input_path, tweet_text, output_path="final_feedity.mp4"
 
     header_clip = ImageClip(header_img_np).with_duration(scaled_clip.duration)
 
-    # Posicionament
+    # Posicionament: Capçalera a dalt, vídeo just a sota
     header_clip = header_clip.with_position(("center", 180))
     video_y_pos = 180 + header_h + 10
     video_positioned = scaled_clip.with_position(("center", video_y_pos))
@@ -618,7 +615,7 @@ def process_video_canvas(input_path, tweet_text, output_path="final_feedity.mp4"
 
 
 # ==========================================
-# NOTIFICACIÓ TELEGRAM
+# NOTIFICACIÓ TELEGRAM (ENVIAMENT EN 2 MISSATGES)
 # ==========================================
 
 def send_telegram_notification(video_path, tweet_text, credits, generated_caption, video_id):
@@ -745,7 +742,6 @@ def get_reel_by_url(reel_url):
         delay_seconds=60
     )
 
-    # Si després dels 5 intents no hi ha resposta, retornem None per aturar el procés
     if not tweet_text:
         return None, None, None, None, None
 
