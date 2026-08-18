@@ -2,49 +2,21 @@ import os
 import re
 import json
 import glob
-import urllib.request
 import requests
 import numpy as np
 import cv2
 import ollama
 import yt_dlp
-from PIL import Image, ImageDraw, ImageFont
-from moviepy import VideoFileClip, CompositeVideoClip, ImageClip, ColorClip
+from moviepy import VideoFileClip, CompositeVideoClip, TextClip
 
-# =============================================================================
-# CONFIGURACIÓ DE DISSENY I FONS
-# =============================================================================
-# Color del lienzo (RGB): Verd debug
-CANVAS_BG_COLOR = (0, 255, 0)
-
-CANVAS_WIDTH = 1080
-CANVAS_HEIGHT = 1920
-LOGO_PATH = "assets/logo.png"
-
-# Descàrrega temporal de la font Lexend des de Google Fonts al directori /tmp/
-FONT_DIR = "/tmp/fonts"
-LEXEND_REGULAR_PATH = os.path.join(FONT_DIR, "Lexend-Regular.ttf")
-LEXEND_BOLD_PATH = os.path.join(FONT_DIR, "Lexend-Bold.ttf")
+# Font utilitzada per "cremar" el titular sobre el vídeo.
+HEADLINE_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 INSTAGRAM_COOKIES_FILE = os.getenv("INSTAGRAM_COOKIES_FILE")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma2:2b")
 TEST_MODE = False
-
-
-def setup_fonts():
-    """Baixa les fonts Lexend directament de Google Fonts si no estan a /tmp/."""
-    os.makedirs(FONT_DIR, exist_ok=True)
-    urls = {
-        LEXEND_REGULAR_PATH: "https://github.com/google/fonts/raw/main/ofl/lexend/Lexend%5Bwght%5D.ttf",
-        LEXEND_BOLD_PATH: "https://github.com/google/fonts/raw/main/ofl/lexend/Lexend%5Bwght%5D.ttf"
-    }
-    for path, url in urls.items():
-        if not os.path.exists(path):
-            try:
-                urllib.request.urlretrieve(url, path)
-            except Exception as e:
-                print(f"⚠️ Error descarregant la font ({url}): {e}", flush=True)
 
 
 def load_processed_ids():
@@ -68,71 +40,45 @@ def save_processed_id(video_id):
 
 
 def analyze_caption_with_local_ai(caption):
-    """
-    Prompt millorat amb exemples (Few-Shot Prompting) per obtenir títols
-    virals, moderns, amb slang de xarxes i etiquetes de negreta ben aplicades.
-    """
     prompt = f"""
-    You are the lead social media copywriter for @feedity.tv, a viral media brand.
-    Analyze the raw video caption below and generate a modern, engaging headline and Instagram post.
+    Analitza aquesta descripció de xarxes socials i genera:
+    1. Els crèdits o l'autor original del vídeo (p. ex., @usuari). Si no n'hi ha, posa "Unknown".
+    2. Un títol o headline impactant de màxim 6 paraules en anglès per posar a sobre del vídeo.
+    3. Una nova descripció (caption) optimitzada per a Instagram/TikTok en anglès, amb crida a l'acció (CTA) i hashtags virals.
 
-    Raw caption: "{caption}"
+    Descripció original: "{caption}"
 
-    STRICT INSTRUCTIONS:
-    1. **LANGUAGE**: ALL generated content MUST be written strictly in ENGLISH.
-    2. **credits**: Extract the original creator's handle (e.g. @creator). Return "Unknown" if not found.
-    3. **headline**: Create a 10 to 16-word VIRAL HEADLINE for the top video header.
-       - Style: Use current brainrot/internet slang, clickbait, or relatable hooks (e.g. "bro thought", "no way he actually", "living rent free", "insane plot twist", "nah this is crazy").
-       - Format: Wrap the MOST IMPORTANT words in <b> and </b> tags so they get rendered in BOLD.
-       - NEVER leave it blank and NEVER output generic titles like "Viral moment".
-    4. **generated_caption**: Write a short, engaging Instagram caption with emojis and trending hashtags. Use ONLY @feedity.tv for CTAs.
-
-    EXAMPLES OF GOOD HEADLINES:
-    - "Bro really thought he could <b>get away with this</b> live on national TV 💀"
-    - "Nah this <b>plot twist</b> caught everyone completely off guard 😭"
-    - "This core memory will live <b>rent free in my head</b> forever"
-    - "She literally unlocked a <b>hidden side quest</b> during the audition 💀"
-
-    Respond ONLY with a valid JSON object:
-    {{
-      "credits": "@username",
-      "headline": "Bro really thought he could <b>get away with this</b> 💀",
-      "generated_caption": "Wait for the end! 🍿 Follow @feedity.tv for more viral clips!\n\n#viral #funny"
-    }}
+    Respon NOMÉS en format JSON com aquest:
+    {{"credits": "@usuari", "headline": "Titular Impactant", "generated_caption": "Text de la descripció nova amb hashtags..."}}
     """
     try:
         response = ollama.chat(
-            model='gemma2',
+            model=OLLAMA_MODEL,
             messages=[{'role': 'user', 'content': prompt}]
         )
         content = response['message']['content']
         match = re.search(r'\{.*\}', content, re.DOTALL)
         if match:
             data = json.loads(match.group())
-            credits = data.get("credits", "Unknown")
-            headline = data.get("headline", "").strip()
-            gen_caption = data.get("generated_caption", "").strip()
-            
-            if not headline or "feedity" in headline.lower():
-                headline = "Nah this <b>unbelievable moment</b> caught everyone off guard 💀"
-
-            gen_caption = re.sub(r'@[A-Za-z0-9_.]+', '@feedity.tv', gen_caption)
-            
-            if credits and credits != "Unknown":
-                gen_caption = f"{gen_caption}\n\nVia: {credits}"
-                
-            return credits, headline, gen_caption
+            return (
+                data.get("credits", "Unknown"), 
+                data.get("headline", ""), 
+                data.get("generated_caption", "")
+            )
     except Exception as e:
-        print(f"⚠️ Error analitzant amb Ollama: {e}", flush=True)
+        print(f"⚠️ Error en analitzar amb Ollama: {e}")
     
-    return "Unknown", "Bro really thought he could <b>pull this off</b> live on camera 💀", f"Follow @feedity.tv for more! 🍿\n\n{caption}"
+    return "Unknown", "", caption
+
 
 def extract_shortcode(reel_url):
+    """Extreu el shortcode (p.ex. 'CxYz123AbCd') d'una URL de reel/post d'Instagram."""
     match = re.search(r"instagram\.com/(?:reel|reels|p|tv)/([A-Za-z0-9_-]+)", reel_url)
     return match.group(1) if match else None
 
 
 def _cleanup_temp_input():
+    """Elimina restes de descàrregues anteriors (temp_input.* de qualsevol extensió)."""
     for f in glob.glob("temp_input.*"):
         try:
             os.remove(f)
@@ -141,14 +87,16 @@ def _cleanup_temp_input():
 
 
 def get_reel_by_url(reel_url):
+    """Processa un reel a partir de la seva URL directa, via yt-dlp."""
     processed_ids = load_processed_ids()
     shortcode = extract_shortcode(reel_url)
 
     if shortcode and shortcode in processed_ids:
-        print(f"⏭️ Reel ja processat anteriorment ({shortcode}), s'omet.", flush=True)
+        print(f"⏭️ Reel ja processat anteriorment ({shortcode}), s'omet.")
         return None, None, None, None, None
 
-    print(f"⬇️ Descarregant reel amb yt-dlp: {reel_url}", flush=True)
+    print(f"⬇️ Descarregant reel amb yt-dlp: {reel_url}")
+
     _cleanup_temp_input()
 
     ydl_opts = {
@@ -165,13 +113,18 @@ def get_reel_by_url(reel_url):
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(reel_url, download=True)
+    except yt_dlp.utils.DownloadError as e:
+        print(f"❌ Error en descarregar el reel amb yt-dlp: {e}")
+        print("   💡 Si l'error menciona 'login required' o 'rate-limit', assegura't que "
+              "INSTAGRAM_COOKIES_FILE conté un cookies.txt vàlid.")
+        return None, None, None, None, None
     except Exception as e:
-        print(f"❌ Error descarregant amb yt-dlp: {e}", flush=True)
+        print(f"❌ Error inesperat amb yt-dlp: {e}")
         return None, None, None, None, None
 
     video_id = str(info.get("id") or shortcode or reel_url)
     if video_id in processed_ids:
-        print(f"⏭️ Reel ja processat ({video_id}), s'omet.", flush=True)
+        print(f"⏭️ Reel ja processat anteriorment ({video_id}), s'omet.")
         return None, None, None, None, None
 
     downloaded_path = ydl.prepare_filename(info)
@@ -180,314 +133,237 @@ def get_reel_by_url(reel_url):
         downloaded_path = candidates[0] if candidates else None
 
     if not downloaded_path or not os.path.exists(downloaded_path):
-        print("❌ No s'ha pogut localitzar el fitxer descarregat.", flush=True)
+        print("⚠️ yt-dlp no ha generat cap fitxer de vídeo.")
         return None, None, None, None, None
 
     caption_raw = info.get("description") or ""
 
-    print("🤖 Analitzant contingut amb Gemma 2...", flush=True)
+    print(f"🤖 Analitzant i generant contingut amb Ollama ({OLLAMA_MODEL})...")
     credits, headline, generated_caption = analyze_caption_with_local_ai(caption_raw)
 
     return downloaded_path, video_id, credits, headline, generated_caption
 
 
-def _sample_frames_grayscale_from_clip(clip, num_samples=10):
+# ==========================================
+# DETECCIÓ I CROP INTEL·LIGENT DE CONTINGUT
+# ==========================================
+
+def detect_background_color(frame):
+    """Detecta el color de fons mostrejant els extrems superior i inferior centrals."""
+    h, w, _ = frame.shape
+    top_sample = frame[0:15, w//4:3*w//4]
+    bottom_sample = frame[h-15:h, w//4:3*w//4]
+    samples = np.concatenate([top_sample, bottom_sample], axis=0)
+    return np.median(samples, axis=(0, 1))
+
+
+def get_longest_consecutive_run(bool_array):
+    """Calcula la seqüència contínua més llarga de valors True en un array 1D."""
+    max_run = 0
+    current_run = 0
+    for val in bool_array:
+        if val:
+            current_run += 1
+            if current_run > max_run:
+                max_run = current_run
+        else:
+            current_run = 0
+    return max_run
+
+
+def find_video_box_in_frame(frame, color_diff_threshold=30, min_width_ratio=0.65, min_height_ratio=0.65):
+    """
+    Troba el requadre rectangular del vídeo real ignorant text, avatars i fons plans.
+    """
+    h, w, _ = frame.shape
+    bg_color = detect_background_color(frame)
+
+    diff = np.max(np.abs(frame.astype(np.float32) - bg_color), axis=2)
+    foreground_mask = diff > color_diff_threshold
+
+    # 1. Escaneig Vertical (ignora text/logos que no ocupen prou amplada contínua)
+    min_continuous_px = int(w * min_width_ratio)
+    valid_y = []
+
+    for y in range(h):
+        row = foreground_mask[y, :]
+        if get_longest_consecutive_run(row) >= min_continuous_px:
+            valid_y.append(y)
+
+    if not valid_y:
+        return None
+
+    y1 = valid_y[0]
+    y2 = valid_y[-1]
+
+    if (y2 - y1) < 100:
+        return None
+
+    # 2. Escaneig Horitzontal dins de la franja y1:y2
+    video_region_mask = foreground_mask[y1:y2, :]
+    region_h = y2 - y1
+    min_col_pixels = int(region_h * min_height_ratio)
+
+    valid_x = []
+    for x in range(w):
+        col = video_region_mask[:, x]
+        if np.sum(col) >= min_col_pixels:
+            valid_x.append(x)
+
+    if not valid_x:
+        x1, x2 = 0, w
+    else:
+        x1 = valid_x[0]
+        x2 = valid_x[-1]
+
+    return (x1, y1, max(1, x2 - x1), max(1, y2 - y1))
+
+
+def crop_content_bounding_box(clip, num_samples=6):
+    """
+    Mostreja diversos fotogrames al llarg del vídeo i obté la mediana del requadre
+    on hi ha contingut real en moviment/vídeo.
+    """
     duration = clip.duration
     if not duration or duration <= 0:
-        return []
-    safe_end = max(duration - 0.05, 0)
-    timestamps = np.linspace(0, safe_end, num=num_samples)
-    frames = []
+        return None
+
+    timestamps = np.linspace(0.5, max(duration - 0.5, 0.5), num=num_samples)
+    boxes = []
+
     for t in timestamps:
         try:
             frame = clip.get_frame(t)
-            frames.append(cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY).astype(np.float32))
+            box = find_video_box_in_frame(frame)
+            if box:
+                boxes.append(box)
         except Exception:
             continue
-    return frames
 
-
-def _refine_micro_borders(frame_crop, threshold_white=215, max_check_pixels=15):
-    """Fase 2: Retalla micro-bordes residuals clars."""
-    h, w = frame_crop.shape
-    top, bottom, left, right = 0, 0, 0, 0
-
-    for y in range(min(max_check_pixels, h)):
-        if np.mean(frame_crop[y, :]) > threshold_white:
-            top = y + 1
-        else:
-            break
-
-    for y in range(1, min(max_check_pixels, h)):
-        if np.mean(frame_crop[h - y, :]) > threshold_white:
-            bottom = y
-        else:
-            break
-
-    for x in range(min(max_check_pixels, w)):
-        if np.mean(frame_crop[:, x]) > threshold_white:
-            left = x + 1
-        else:
-            break
-
-    for x in range(1, min(max_check_pixels, w)):
-        if np.mean(frame_crop[:, w - x]) > threshold_white:
-            right = x
-        else:
-            break
-
-    return top, bottom, left, right
-
-
-def crop_content_bounding_box(clip):
-    """Detecció i retall de fons en 2 FASES (Global + Micro-crop)."""
-    frames = _sample_frames_grayscale_from_clip(clip)
-    if not frames:
+    if not boxes:
         return None
 
-    stacked = np.stack(frames, axis=0)
-    mean_frame = stacked.mean(axis=0).astype(np.uint8)
+    boxes = np.array(boxes)
+    median_box = np.median(boxes, axis=0).astype(int)
+    x, y, w, h = median_box
 
-    # FASE 1: Crop Global
-    grad_x = cv2.Sobel(mean_frame, cv2.CV_64F, 1, 0, ksize=3)
-    grad_y = cv2.Sobel(mean_frame, cv2.CV_64F, 0, 1, ksize=3)
-    magnitude = cv2.magnitude(grad_x, grad_y)
-    _, edge_mask = cv2.threshold(magnitude.astype(np.uint8), 20, 255, cv2.THRESH_BINARY)
+    return (int(x), int(y), int(w), int(h))
 
-    variance_map = stacked.std(axis=0)
-    _, motion_mask = cv2.threshold(variance_map.astype(np.uint8), 3, 255, cv2.THRESH_BINARY)
 
-    combined_mask = cv2.bitwise_or(edge_mask, motion_mask)
-    kernel = np.ones((9, 9), np.uint8)
-    combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
+# ==========================================
+# RENDERITZAT I EDICIÓ DE VÍDEO
+# ==========================================
 
-    contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
+def build_headline_clip(headline, duration, canvas_width=1080):
+    """Crea el TextClip del titular que es posiciona a sobre del vídeo."""
+    if not headline:
         return None
-
-    h_f, w_f = mean_frame.shape
-    valid_contours = [c for c in contours if cv2.boundingRect(c)[2] > 100 and cv2.boundingRect(c)[3] > 100]
-
-    if not valid_contours:
+    try:
+        txt_clip = TextClip(
+            font=HEADLINE_FONT,
+            text=headline.upper(),
+            font_size=80,
+            color="white",
+            stroke_color="black",
+            stroke_width=4,
+            method="caption",
+            size=(int(canvas_width * 0.9), 320),
+            text_align="center",
+            horizontal_align="center",
+            interline=20,
+        )
+        return txt_clip.with_duration(duration).with_position(("center", 140))
+    except Exception as e:
+        print(f"⚠️ No s'ha pogut generar el titular sobre el vídeo: {e}")
         return None
-
-    x_min, y_min = w_f, h_f
-    x_max, y_max = 0, 0
-
-    for c in valid_contours:
-        x, y, w, h = cv2.boundingRect(c)
-        x_min = min(x_min, x)
-        y_min = min(y_min, y)
-        x_max = max(x_max, x + w)
-        y_max = max(y_max, y + h)
-
-    w_phase1 = x_max - x_min
-    h_phase1 = y_max - y_min
-
-    # FASE 2: Micro-Crop de Precisió
-    cropped_subframe = mean_frame[y_min:y_max, x_min:x_max]
-    top_trim, bottom_trim, left_trim, right_trim = _refine_micro_borders(cropped_subframe)
-
-    final_x = x_min + left_trim
-    final_y = y_min + top_trim
-    final_w = w_phase1 - left_trim - right_trim
-    final_h = h_phase1 - top_trim - bottom_trim
-
-    if top_trim or bottom_trim or left_trim or right_trim:
-        print(f"🔍 Micro-crop Fase 2 aplicat: Top={top_trim}px, Bottom={bottom_trim}px, Left={left_trim}px, Right={right_trim}px", flush=True)
-
-    return (final_x, final_y, final_w, final_h)
-
-
-def generate_header_card_image(headline_html, width=960):
-    """
-    Renderitzador de capçaleres amb parsejador de negretes HTML (<b>...</b>) millorat
-    i salt de línia dinàmic amb la font Lexend.
-    """
-    setup_fonts()
-
-    font_name = ImageFont.truetype(LEXEND_BOLD_PATH, 36)
-    font_handle = ImageFont.truetype(LEXEND_REGULAR_PATH, 28)
-    
-    # Mida de font principal per al títol
-    font_size = 38
-    font_text_reg = ImageFont.truetype(LEXEND_REGULAR_PATH, font_size)
-    font_text_bold = ImageFont.truetype(LEXEND_BOLD_PATH, font_size)
-
-    logo_size = 90
-    if os.path.exists(LOGO_PATH):
-        logo_img = Image.open(LOGO_PATH).convert("RGBA")
-        logo_img = logo_img.resize((logo_size, logo_size), Image.Resampling.LANCZOS)
-    else:
-        logo_img = Image.new("RGBA", (logo_size, logo_size), (200, 200, 200, 255))
-
-    # Parsejador d'etiquetes <b> i </b>
-    tokens = []
-    # Divideix mantenint la distinció de si està dins d'un <b> o no
-    raw_segments = re.split(r'(<b>.*?</b>)', headline_html, flags=re.IGNORECASE)
-    for segment in raw_segments:
-        if not segment:
-            continue
-        if segment.lower().startswith("<b>") and segment.lower().endswith("</b>"):
-            clean_text = segment[3:-4]
-            for w in clean_text.split():
-                tokens.append((w, True))
-        else:
-            for w in segment.split():
-                tokens.append((w, False))
-
-    # Calculador de salts de línia per evitar que el text surti de la imatge
-    lines = []
-    current_line = []
-    current_w = 0
-    space_w = font_text_reg.getlength(" ")
-
-    for word, is_bold in tokens:
-        f = font_text_bold if is_bold else font_text_reg
-        w_len = f.getlength(word)
-        if current_w + w_len > (width - 40):
-            if current_line:
-                lines.append(current_line)
-            current_line = [(word, is_bold)]
-            current_w = w_len + space_w
-        else:
-            current_line.append((word, is_bold))
-            current_w += w_len + space_w
-            
-    if current_line:
-        lines.append(current_line)
-
-    line_height = 50
-    text_section_h = len(lines) * line_height
-    header_h = 110
-    total_h = header_h + text_section_h + 20
-
-    final_card = Image.new("RGBA", (width, total_h), (0, 0, 0, 0))
-    final_card.paste(logo_img, (10, 10), logo_img)
-
-    draw = ImageDraw.Draw(final_card)
-    draw.text((120, 15), "Feedity", font=font_name, fill=(255, 255, 255, 255))
-    draw.text((120, 60), "@feedity.tv", font=font_handle, fill=(160, 160, 160, 255))
-
-    y_cursor = header_h
-    for line in lines:
-        x_cursor = 10
-        for word, is_bold in line:
-            f = font_text_bold if is_bold else font_text_reg
-            draw.text((x_cursor, y_cursor), word, font=f, fill=(255, 255, 255, 255))
-            x_cursor += f.getlength(word) + space_w
-        y_cursor += line_height
-
-    img_path = "/tmp/header_card.png"
-    final_card.save(img_path)
-    return img_path, total_h
 
 
 def process_video_canvas(input_path, headline, output_path="final_feedity.mp4"):
-    print("🎬 Renderitzant composició del vídeo sobre el fons verd...", flush=True)
     clip = VideoFileClip(input_path)
+    frame_w, frame_h = clip.w, clip.h
     bbox = crop_content_bounding_box(clip)
 
-    if bbox:
+    min_area_ratio = 0.10
+    if bbox and (bbox[2] * bbox[3]) >= min_area_ratio * frame_w * frame_h:
         x, y, w, h = bbox
-        print(f"✂️ Marc extern eliminat: x={x}, y={y}, w={w}, h={h}", flush=True)
-        cropped_clip = clip.cropped(x1=x, y1=y, x2=x + w, y2=y + h)
+        # Marge de seguretat del 1%
+        margin_x = int(w * 0.01)
+        margin_y = int(h * 0.01)
+        x1 = max(0, x - margin_x)
+        y1 = max(0, y - margin_y)
+        x2 = min(frame_w, x + w + margin_x)
+        y2 = min(frame_h, y + h + margin_y)
+        print(f"✂️ Crop aplicat amb èxit: x={x1}, y={y1}, x2={x2}, y2={y2}")
+        cropped_clip = clip.cropped(x1=x1, y1=y1, x2=x2, y2=y2)
     else:
+        print("ℹ️ No s'ha detectat cap marc distintiu, no s'aplica crop.")
         cropped_clip = clip
 
-    target_width = 960
-    scaled_clip = cropped_clip.resized(width=target_width)
+    scaled_clip = cropped_clip.resized(width=1080)
+    layers = [scaled_clip.with_position("center")]
 
-    bg_clip = ColorClip(size=(CANVAS_WIDTH, CANVAS_HEIGHT), color=CANVAS_BG_COLOR, duration=clip.duration)
-    layers = [bg_clip]
+    headline_clip = build_headline_clip(headline, scaled_clip.duration)
+    if headline_clip:
+        print(f"🖋️ Sobreposant titular: {headline}")
+        layers.append(headline_clip)
 
-    final_headline = headline if (headline and headline.strip()) else "<b>Featured</b> moment"
-
-    header_img_path, card_h = generate_header_card_image(final_headline, width=target_width)
-    header_clip = (
-        ImageClip(header_img_path)
-        .with_duration(clip.duration)
-        .with_position(("center", 140))
+    final_clip = CompositeVideoClip(layers, size=(1080, 1920))
+    
+    final_clip.write_videofile(
+        output_path, 
+        codec="libx264", 
+        audio_codec="aac",
+        fps=30,
+        preset="fast"
     )
-    layers.append(header_clip)
-
-    video_y_pos = 140 + card_h + 20
-    scaled_clip = scaled_clip.with_position(("center", video_y_pos))
-    layers.append(scaled_clip)
-
-    final_clip = CompositeVideoClip(layers, size=(CANVAS_WIDTH, CANVAS_HEIGHT))
-    final_clip.write_videofile(output_path, codec="libx264", audio_codec="aac")
-
+    
     clip.close()
     cropped_clip.close()
     final_clip.close()
+    if headline_clip:
+        headline_clip.close()
 
+
+# ==========================================
+# NOTIFICACIÓ TELEGRAM
+# ==========================================
 
 def send_telegram_notification(video_path, headline, credits, generated_caption, video_id):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ Telegram configuració no trobada. Notificació omessa.", flush=True)
+        print("⚠️ Notificació de Telegram omessa (tokens no configurats).")
         return
         
-    print("📤 Enviant notificació i vídeo a Telegram...", flush=True)
-
-    # Clean HTML tags like <b> from headline for raw telegram markdown
-    clean_headline = re.sub(r'</?b>', '*', headline)
-
-    text_message = (
-        f"🎬 **NOU VÍDEO PROCESSAT PER A FEEDITY**\n\n"
-        f"📌 **Títol**: {clean_headline}\n"
-        f"👤 **Crèdits**: {credits}\n"
-        f"🆔 **ID**: {video_id}\n\n"
-        f"📝 **CAPTION A COPIAR**:\n\n"
-        f"{generated_caption}"
+    message_text = (
+        f"🎬 *NOU VÍDEO PROCESSAT PER A FEEDITY*\n\n"
+        f"📌 *Títol*: {headline}\n"
+        f"👤 *Crèdits*: {credits}\n"
+        f"🆔 *ID*: `{video_id}`\n\n"
+        f"📝 *CAPTION GENERAT*:\n{generated_caption}"
     )
 
-    base_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
-
-    try:
-        # 1. Enviem primer el missatge complet amb el caption per copiar
-        msg_response = requests.post(
-            f"{base_url}/sendMessage",
-            data={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": text_message
-            },
-            timeout=30
-        )
-        if not msg_response.ok:
-            print(f"⚠️ Error enviant el text a Telegram: {msg_response.text}", flush=True)
-
-        # 2. Enviem el fitxer de vídeo amb un caption curt (per no superar el límit de 1024 caràcters)
-        video_caption = f"🎬 {clean_headline}\n👤 {credits}"
-        
-        with open(video_path, "rb") as video_file:
-            video_response = requests.post(
-                f"{base_url}/sendVideo",
-                data={
-                    "chat_id": TELEGRAM_CHAT_ID,
-                    "caption": video_caption[:1000]  # Retalla de seguretat
-                },
-                files={"video": video_file},
-                timeout=120  # Timeout més alt per a la pujada del vídeo
-            )
-            
-        if video_response.ok:
-            print("✅ Vídeo enviat correctament a Telegram!", flush=True)
+    # Telegram sendVideo té un límit estricte de 1024 caràcters per al caption
+    if len(message_text) > 1024:
+        message_text = message_text[:1020] + "..."
+    
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
+    with open(video_path, "rb") as video_file:
+        files = {"video": video_file}
+        data = {
+            "chat_id": TELEGRAM_CHAT_ID, 
+            "caption": message_text,
+            "parse_mode": "Markdown"
+        }
+        res = requests.post(url, data=data, files=files)
+        if res.status_code == 200:
+            print("🚀 Vídeo i dades enviats correctament a Telegram!")
         else:
-            print(f"❌ Error en enviar el vídeo a Telegram: {video_response.text}", flush=True)
+            print(f"❌ Error en enviar a Telegram: {res.text}")
 
-    except Exception as e:
-        print(f"❌ Error de connexió en enviar a Telegram: {e}", flush=True)
 
 def main():
-    print("🚀 Iniciant pipeline de Feedity...", flush=True)
-
     if not os.path.exists("sources.csv"):
-        print("❌ ERROR: No s'ha trobat el fitxer sources.csv", flush=True)
+        print("❌ No s'ha trobat el fitxer sources.csv")
         return
-
-    processed = load_processed_ids()
-    print(f"📊 Històric de vídeos processats anteriorment: {len(processed)}", flush=True)
 
     with open("sources.csv", "r") as f:
         reel_urls = [
@@ -495,27 +371,18 @@ def main():
             if line.strip() and not line.startswith("reel_url") and not line.startswith("account_handle")
         ]
 
-    if not reel_urls:
-        print("⚠️ El fitxer sources.csv no conté cap URL per processar.", flush=True)
-        return
-
-    print(f"🔗 S'han trobat {len(reel_urls)} URLs a sources.csv", flush=True)
-
-    processed_any = False
     for reel_url in reel_urls:
-        print(f"\n🚀 Processant reel: {reel_url}", flush=True)
+        print(f"\n🚀 Processant reel: {reel_url}")
         video_file, video_id, credits, headline, generated_caption = get_reel_by_url(reel_url)
 
         if video_file:
             process_video_canvas(video_file, headline, "final_feedity.mp4")
             send_telegram_notification("final_feedity.mp4", headline, credits, generated_caption, video_id)
             save_processed_id(video_id)
-            print("✅ Procés finalitzat amb èxit!", flush=True)
-            processed_any = True
+            print("✅ Procés finalitzat amb èxit!")
             break
-
-    if not processed_any:
-        print("ℹ️ No s'ha processat cap vídeo nou (tots ja estaven processats o s'ha produït un error).", flush=True)
+        else:
+            print(f"⚠️ Reel omès o sense contingut nou: {reel_url}")
 
 
 if __name__ == "__main__":
