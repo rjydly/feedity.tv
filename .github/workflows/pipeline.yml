@@ -2,14 +2,14 @@ name: Feedity Video Pipeline
 
 on:
   schedule:
-    - cron: '0 */6 * * *'  # S'executa automàticament cada 6 hores
-  workflow_dispatch:        # Permet l'execució manual des de la pestanya Actions
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
 
 jobs:
   build-and-process:
     runs-on: ubuntu-latest
     permissions:
-      contents: write       # Permís necessari per fer commit i push de processed_videos.json
+      contents: write
 
     steps:
       - name: Checkout Repository
@@ -19,11 +19,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
-      - name: Install System Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg libsm6 libxext6 fonts-dejavu-core
+          cache: 'pip'  # Guarda en memòria cau les llibreries per anar encara més ràpid
 
       - name: Install Python Dependencies
         run: |
