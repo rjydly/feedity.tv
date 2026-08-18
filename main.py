@@ -7,7 +7,8 @@ import requests
 import numpy as np
 import cv2
 from PIL import Image
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import yt_dlp
 from moviepy import VideoFileClip, CompositeVideoClip, TextClip
 
@@ -18,11 +19,10 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 INSTAGRAM_COOKIES_FILE = os.getenv("INSTAGRAM_COOKIES_FILE")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-TEST_MODE = True
+TEST_MODE = False
 
-# Configuració de Gemini
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+# Inicialització del client Gemini amb el nou SDK oficial
+gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 
 def load_processed_ids():
@@ -58,25 +58,9 @@ def extract_frame_as_image(video_path, timestamp=0.5):
     return None
 
 
-def get_best_available_gemini_model():
-    """Tria dinàmicament el millor model Flash actiu per evitar errors 404."""
-    try:
-        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        # Preferència per versions Flash recents
-        for preferred in ["models/gemini-2.0-flash", "models/gemini-1.5-flash-latest", "models/gemini-1.5-flash", "models/gemini-2.5-flash"]:
-            if preferred in models:
-                return preferred
-        for m in models:
-            if "flash" in m:
-                return m
-        return models[0] if models else "gemini-2.0-flash"
-    except Exception:
-        return "gemini-2.0-flash"
-
-
 def analyze_with_gemini_vision(image_pil, caption_raw=""):
-    """Analitza el contingut visual i text amb Gemini Flash."""
-    if not GEMINI_API_KEY:
+    """Analitza el contingut visual i text amb Gemini Flash (nou SDK google-genai)."""
+    if not gemini_client:
         print("⚠️ GEMINI_API_KEY no configurada. S'utilitzaran valors per defecte.")
         return "Unknown", "", caption_raw
 
@@ -97,31 +81,39 @@ def analyze_with_gemini_vision(image_pil, caption_raw=""):
     }
     """
 
-    try:
-        model_name = get_best_available_gemini_model()
-        print(f"🧠 Utilitzant model: {model_name}")
-        model = genai.GenerativeModel(
-            model_name=model_name,
-            generation_config={"response_mime_type": "application/json"}
-        )
-        
-        inputs = [prompt]
-        if image_pil is not None:
-            inputs.append(image_pil)
-        if caption_raw:
-            inputs.append(f"\nOriginal video description: {caption_raw}")
+    # Llista de models compatibles en ordre de preferència
+    candidate_models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+    
+    contents = [prompt]
+    if image_pil is not None:
+        contents.append(image_pil)
+    if caption_raw:
+        contents.append(f"\nOriginal video description: {caption_raw}")
 
-        response = model.generate_content(inputs)
-        data = json.loads(response.text)
-        
-        return (
-            data.get("credits", "Unknown"),
-            data.get("headline", ""),
-            data.get("generated_caption", "")
-        )
-    except Exception as e:
-        print(f"⚠️ Error en analitzar amb Gemini Vision: {e}")
-        return "Unknown", "", caption_raw
+    config = types.GenerateContentConfig(
+        response_mime_type="application/json"
+    )
+
+    for model_name in candidate_models:
+        try:
+            print(f"🧠 Provant model Gemini: {model_name}...")
+            response = gemini_client.models.generate_content(
+                model=model_name,
+                contents=contents,
+                config=config
+            )
+            data = json.loads(response.text)
+            return (
+                data.get("credits", "Unknown"),
+                data.get("headline", ""),
+                data.get("generated_caption", "")
+            )
+        except Exception as e:
+            print(f"ℹ️ Model {model_name} no disponible ({e}), provant següent...")
+            continue
+
+    print("⚠️ No s'ha pogut obtenir resposta de cap model de Gemini.")
+    return "Unknown", "", caption_raw
 
 
 def extract_shortcode(reel_url):
@@ -367,12 +359,10 @@ def send_telegram_notification(video_path, headline, credits, generated_caption,
         print("⚠️ Notificació de Telegram omessa (tokens no configurats).")
         return
 
-    # Escapem caràcters per evitar trencar el format HTML de Telegram
     safe_headline = html.escape(headline or "Sense Títol")
     safe_credits = html.escape(credits or "Unknown")
     safe_video_id = html.escape(video_id or "")
     
-    # Retallem el caption generat si és massa llarg per respectar el límit de 1024 caràcters
     max_caption_len = 650
     if len(generated_caption) > max_caption_len:
         generated_caption = generated_caption[:max_caption_len] + "..."
