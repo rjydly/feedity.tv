@@ -25,6 +25,9 @@ ASSETS_DIR = "assets"
 FONTS_DIR = os.path.join(ASSETS_DIR, "fonts")
 LOGO_PATH = os.path.join(ASSETS_DIR, "logo.png")
 
+# Text de drets que anirà sempre al final de cada caption
+DISCLAIMER_TEXT = "All rights belong to the respective owner. DM for credit or removal."
+
 
 # ==========================================
 # GESTIÓ D'HISTORIAL
@@ -144,7 +147,7 @@ def image_to_base64_jpeg(image_pil):
     return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
 
-AI_PROMPT_INSTRUCTIONS = """
+AI_PROMPT_INSTRUCTIONS = f"""
 Examine this video frame and the original post caption carefully.
 
 RULES FOR CREDITS:
@@ -162,17 +165,26 @@ Structure the caption in this exact order:
 1. Engaging Hook & detailed backstory / facts explaining the context of what is happening in the video.
 2. Call to Action (CTA) (e.g. 'Would you try this? Let us know below! 👇').
 3. 8-12 targeted viral hashtags.
-4. AT THE VERY END (last line after hashtags): Add the credit line strictly formatted as:
+4. Credit line (ONLY if a true original source was identified):
    Credit: @original_author
-   (If no original creator exists, DO NOT include any credit line at all).
+5. AT THE VERY BOTTOM (the last line of the entire caption):
+   {DISCLAIMER_TEXT}
 
 Return strictly a JSON object with this format:
-{
+{{
   "credits": "@original_creator_or_empty",
   "tweet_text": "First line hook\\n\\nSecond line with **bold words**.",
-  "generated_caption": "Detailed story/backstory...\\n\\nCTA\\n\\n#hashtags\\n\\nCredit: @original_author"
-}
+  "generated_caption": "Detailed story/backstory...\\n\\nCTA\\n\\n#hashtags\\n\\nCredit: @original_author\\n\\n{DISCLAIMER_TEXT}"
+}}
 """
+
+
+def format_final_caption(generated_caption):
+    """Garanteix que el text de drets estigui sempre al final de tot del caption."""
+    caption = (generated_caption or "").strip()
+    if DISCLAIMER_TEXT not in caption:
+        caption = f"{caption}\n\n{DISCLAIMER_TEXT}" if caption else DISCLAIMER_TEXT
+    return caption
 
 
 def analyze_with_groq_vision(image_pil, caption_raw=""):
@@ -209,7 +221,7 @@ def analyze_with_groq_vision(image_pil, caption_raw=""):
             return (
                 data.get("credits", ""),
                 clean_tweet_text(data.get("tweet_text", "")),
-                data.get("generated_caption", "")
+                format_final_caption(data.get("generated_caption", ""))
             )
         except Exception as e:
             print(f"ℹ️ Groq error ({model_name}): {e}")
@@ -243,7 +255,7 @@ def analyze_with_gemini_vision(image_pil, caption_raw=""):
             return (
                 data.get("credits", ""),
                 clean_tweet_text(data.get("tweet_text", "")),
-                data.get("generated_caption", "")
+                format_final_caption(data.get("generated_caption", ""))
             )
         except Exception as e:
             print(f"ℹ️ Gemini error ({model_name}): {e}")
@@ -263,7 +275,8 @@ def analyze_content(image_pil, caption_raw=""):
             return res
 
     print("⚠️ No s'ha pogut utilitzar cap API de Visió. S'utilitzen valors per defecte.")
-    return "", "Check **this out**!\n\nUnbelievable moment captured on camera.", caption_raw
+    default_caption = format_final_caption(caption_raw)
+    return "", "Check **this out**!\n\nUnbelievable moment captured on camera.", default_caption
 
 
 # ==========================================
@@ -591,7 +604,7 @@ def send_telegram_notification(video_path, tweet_text, credits, generated_captio
         else:
             print(f"❌ Error en enviar el vídeo a Telegram: {res_video.text}")
 
-    # 2. Enviar el caption d'Instagram extens llest per copiar (amb crèdits al final de tot)
+    # 2. Enviar el caption d'Instagram extens llest per copiar (amb crèdits i drets al final)
     url_msg = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     caption_text = (
         f"📝 <b>CAPTION PER A PUBLICAR (COPIAR I ENGANXAR)</b>:\n\n"
