@@ -18,7 +18,12 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 INSTAGRAM_COOKIES_FILE = os.getenv("INSTAGRAM_COOKIES_FILE")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-TEST_MODE = True
+TEST_MODE = False
+
+# Rutes de recursos
+ASSETS_DIR = "assets"
+FONTS_DIR = os.path.join(ASSETS_DIR, "fonts")
+LOGO_PATH = os.path.join(ASSETS_DIR, "logo.png")
 
 
 # ==========================================
@@ -46,11 +51,62 @@ def save_processed_id(video_id):
 
 
 # ==========================================
+# GESTIÓ DE TIPOGRAFIES (PLUS JAKARTA SANS)
+# ==========================================
+
+def ensure_fonts():
+    """Assegura que les fonts Plus Jakarta Sans estiguin disponibles a assets/fonts/."""
+    os.makedirs(FONTS_DIR, exist_ok=True)
+    
+    font_urls = {
+        "PlusJakartaSans-Regular.ttf": "https://raw.githubusercontent.com/tokotype/PlusJakartaSans/master/fonts/ttf/PlusJakartaSans-Regular.ttf",
+        "PlusJakartaSans-Bold.ttf": "https://raw.githubusercontent.com/tokotype/PlusJakartaSans/master/fonts/ttf/PlusJakartaSans-Bold.ttf",
+        "PlusJakartaSans-SemiBold.ttf": "https://raw.githubusercontent.com/tokotype/PlusJakartaSans/master/fonts/ttf/PlusJakartaSans-SemiBold.ttf"
+    }
+
+    for font_file, url in font_urls.items():
+        dest = os.path.join(FONTS_DIR, font_file)
+        if not os.path.exists(dest):
+            try:
+                print(f"📥 Descarregant font {font_file}...")
+                r = requests.get(url, timeout=10)
+                if r.status_code == 200:
+                    with open(dest, "wb") as f:
+                        f.write(r.content)
+            except Exception as e:
+                print(f"⚠️ Error descarregant {font_file}: {e}")
+
+
+def get_jakarta_font(style="regular", size=42):
+    """Carrega Plus Jakarta Sans amb fallback segur."""
+    ensure_fonts()
+    font_map = {
+        "bold": os.path.join(FONTS_DIR, "PlusJakartaSans-Bold.ttf"),
+        "semibold": os.path.join(FONTS_DIR, "PlusJakartaSans-SemiBold.ttf"),
+        "regular": os.path.join(FONTS_DIR, "PlusJakartaSans-Regular.ttf")
+    }
+
+    path = font_map.get(style, font_map["regular"])
+    if os.path.exists(path):
+        try:
+            return ImageFont.truetype(path, size=size)
+        except Exception:
+            pass
+
+    # Fallback si falla
+    for fallback in ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]:
+        if os.path.exists(fallback):
+            return ImageFont.truetype(fallback, size=size)
+
+    return ImageFont.load_default()
+
+
+# ==========================================
 # UTILITATS D'IMATGE I VISIÓ AI
 # ==========================================
 
 def extract_frame_as_image(video_path, timestamp=0.5):
-    """Extreu un fotograma del vídeo com a objecte PIL Image."""
+    """Extreu un fotograma del vídeo com a PIL Image."""
     cap = cv2.VideoCapture(video_path)
     cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
     success, frame = cap.read()
@@ -69,7 +125,7 @@ def image_to_base64_jpeg(image_pil):
 
 
 def analyze_with_groq_vision(image_pil, caption_raw=""):
-    """Analitza la imatge amb els models de visió actius de Groq."""
+    """Analitza la imatge amb Groq Vision."""
     from groq import Groq
     client = Groq(api_key=GROQ_API_KEY)
 
@@ -77,10 +133,11 @@ def analyze_with_groq_vision(image_pil, caption_raw=""):
         "Examine this video frame and the original post description.\n"
         "1. OCR / Read the header text, tweet, or meme text visible in the image.\n"
         "2. Identify the original author/account handle (e.g. @username from the avatar/watermark or caption). If none, set 'Unknown'.\n"
-        "3. PARAPHRASE the text into a clean, viral, natural tweet/post text in ENGLISH (1-3 short punchy sentences). Keep the exact same joke, tone, and context.\n"
-        "4. Generate an engaging Instagram/TikTok caption in English with a Call to Action and 4-6 viral hashtags.\n\n"
+        "3. PARAPHRASE the text into a clean, viral, natural tweet/post text in ENGLISH structured into 1 or 2 distinct short paragraphs separated by a blank line (\\n\\n).\n"
+        "4. EMPHASIZE 2-4 key punchline words or important phrases using markdown asterisks **like this** so they will appear in bold.\n"
+        "5. Generate an engaging Instagram/TikTok caption in English with a Call to Action and 4-6 viral hashtags.\n\n"
         "Return ONLY a JSON object with this exact structure:\n"
-        '{"credits": "@author", "tweet_text": "Translated and paraphrased tweet text...", "generated_caption": "Caption with #hashtags..."}'
+        '{"credits": "@author", "tweet_text": "First line hook\\n\\nSecond line with **bold emphasis** on punchline", "generated_caption": "Caption with #hashtags..."}'
     )
     
     if caption_raw:
@@ -94,7 +151,6 @@ def analyze_with_groq_vision(image_pil, caption_raw=""):
             "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
         })
 
-    # Models de visió oficials de Groq
     candidate_models = [
         "meta-llama/llama-4-scout-17b-16e-instruct",
         "qwen/qwen3.6-27b"
@@ -131,8 +187,9 @@ def analyze_with_gemini_vision(image_pil, caption_raw=""):
     Examine this video frame and caption.
     1. Read the header text/tweet in the image.
     2. Identify original creator handle (@user).
-    3. Paraphrase the text into natural English tweet style (1-3 sentences).
-    4. Generate viral Instagram caption with hashtags.
+    3. Paraphrase the text into natural English tweet style structured into 1 or 2 short paragraphs (\\n\\n).
+    4. Highlight 2-4 key punchline words in **bold** using markdown asterisks (**bold words**).
+    5. Generate viral Instagram caption with hashtags.
     Return JSON: {"credits": "@author", "tweet_text": "...", "generated_caption": "..."}
     """
     
@@ -164,7 +221,6 @@ def analyze_with_gemini_vision(image_pil, caption_raw=""):
 
 
 def analyze_content(image_pil, caption_raw=""):
-    """Prova primer Groq; si falla, prova Gemini; si falla, retorna valors per defecte."""
     if GROQ_API_KEY:
         res = analyze_with_groq_vision(image_pil, caption_raw)
         if res:
@@ -176,114 +232,163 @@ def analyze_content(image_pil, caption_raw=""):
             return res
 
     print("⚠️ No s'ha pogut utilitzar cap API de Visió. S'utilitzen valors per defecte.")
-    return "Unknown", "Check this out!", caption_raw
+    return "Unknown", "Check **this out**!\n\nUnbelievable moment captured on camera.", caption_raw
 
 
 # ==========================================
-# RENDERITZAT ESTIL TWEET (PILLOW)
+# RENDERITZAT TWEET AMB PLUS JAKARTA SANS & NEGRETA
 # ==========================================
 
-def get_system_font(font_name="bold", size=32):
-    """Busca una font moderna (Montserrat o DejaVu) al sistema."""
-    candidates = []
-    if font_name == "bold":
-        candidates = [
-            "/usr/share/fonts/truetype/montserrat/Montserrat-Bold.ttf",
-            "/usr/share/fonts/truetype/montserrat/Montserrat-SemiBold.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "Arial Bold.ttf"
-        ]
-    elif font_name == "regular":
-        candidates = [
-            "/usr/share/fonts/truetype/montserrat/Montserrat-Medium.ttf",
-            "/usr/share/fonts/truetype/montserrat/Montserrat-Regular.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "Arial.ttf"
-        ]
-
-    for path in candidates:
-        if os.path.exists(path):
-            try:
-                return ImageFont.truetype(path, size=size)
-            except Exception:
-                continue
-    return ImageFont.load_default()
-
-
-def wrap_text(text, font, max_width, draw):
-    """Ajusta les línies de text perquè no superin l'amplada de la pantalla."""
-    lines = []
+def tokenize_markdown_text(text):
+    """
+    Descompon el text amb format markdown (**bold**) en una llista de tokens:
+    [(word, is_bold), ...]
+    """
     paragraphs = text.split("\n")
+    tokenized_paragraphs = []
+
     for para in paragraphs:
         if not para.strip():
-            lines.append("")
+            tokenized_paragraphs.append([])
             continue
-        words = para.split()
+
+        parts = re.split(r'(\*\*[^*]+\*\*)', para)
+        tokens = []
+        for part in parts:
+            if not part:
+                continue
+            if part.startswith("**") and part.endswith("**") and len(part) >= 4:
+                bold_words = part[2:-2].split()
+                for w in bold_words:
+                    tokens.append((w, True))
+            else:
+                regular_words = part.split()
+                for w in regular_words:
+                    tokens.append((w, False))
+        tokenized_paragraphs.append(tokens)
+
+    return tokenized_paragraphs
+
+
+def wrap_tokenized_text(tokenized_paragraphs, regular_font, bold_font, max_width, draw):
+    """Calcula el salt de línia tenint en compte les amplades específiques de les negretes."""
+    all_lines = []
+    space_w_reg = draw.textbbox((0, 0), " ", font=regular_font)[2]
+
+    for para_tokens in tokenized_paragraphs:
+        if not para_tokens:
+            all_lines.append([])  # Línia buida per al paràgraf
+            continue
+
         current_line = []
-        for word in words:
-            test_line = " ".join(current_line + [word])
-            bbox = draw.textbbox((0, 0), test_line, font=font)
-            w = bbox[2] - bbox[0]
-            if w <= max_width:
-                current_line.append(word)
+        current_width = 0
+
+        for word, is_bold in para_tokens:
+            f = bold_font if is_bold else regular_font
+            word_w = draw.textbbox((0, 0), word, font=f)[2]
+
+            needed_width = word_w if not current_line else (current_width + space_w_reg + word_w)
+
+            if needed_width <= max_width:
+                current_line.append((word, is_bold, word_w))
+                current_width = needed_width
             else:
                 if current_line:
-                    lines.append(" ".join(current_line))
-                    current_line = [word]
+                    all_lines.append(current_line)
+                    current_line = [(word, is_bold, word_w)]
+                    current_width = word_w
                 else:
-                    lines.append(word)
+                    all_lines.append([(word, is_bold, word_w)])
+                    current_line = []
+                    current_width = 0
+
         if current_line:
-            lines.append(" ".join(current_line))
-    return lines
+            all_lines.append(current_line)
+
+    return all_lines
 
 
 def create_tweet_header_image(tweet_text, width=1080):
-    """Genera la capçalera estil Tweet amb Avatar, Feedity, @feedity.tv i el text."""
-    margin_x = 70
+    """
+    Genera la capçalera estil Tweet idèntica a la plantilla de referència:
+    - Logo des d'assets/logo.png
+    - Tipografia Plus Jakarta Sans
+    - Suport de paraules en negreta (**bold**)
+    """
+    margin_x = 75
     max_text_width = width - (margin_x * 2)
 
-    name_font = get_system_font("bold", size=40)
-    handle_font = get_system_font("regular", size=34)
-    body_font = get_system_font("bold", size=46)
+    # Tipografies Plus Jakarta Sans
+    name_font = get_jakarta_font("semibold", size=38)
+    handle_font = get_jakarta_font("regular", size=32)
+    body_font_regular = get_jakarta_font("regular", size=44)
+    body_font_bold = get_jakarta_font("bold", size=44)
 
     dummy_img = Image.new("RGBA", (1, 1))
     dummy_draw = ImageDraw.Draw(dummy_img)
-    wrapped_lines = wrap_text(tweet_text, body_font, max_text_width, dummy_draw)
 
-    line_height = 64
-    body_height = len(wrapped_lines) * line_height
-    avatar_size = 90
-    top_padding = 60
-    bottom_padding = 45
+    # Tokenització i maquetació del text
+    tokenized = tokenize_markdown_text(tweet_text)
+    wrapped_lines = wrap_tokenized_text(tokenized, body_font_regular, body_font_bold, max_text_width, dummy_draw)
+
+    line_height = 62
+    paragraph_gap = 26
+    
+    # Càlcul de l'alçada total del text
+    body_height = 0
+    for line in wrapped_lines:
+        if not line:
+            body_height += paragraph_gap
+        else:
+            body_height += line_height
+
+    avatar_size = 86
+    top_padding = 50
+    bottom_padding = 40
     header_height = top_padding + avatar_size + 30 + body_height + bottom_padding
 
+    # Crear fons negre
     img = Image.new("RGBA", (width, header_height), (0, 0, 0, 255))
     draw = ImageDraw.Draw(img)
 
-    # 1. Avatar Circular
+    # 1. Avatar Circular (Llegeix assets/logo.png)
     avatar_x = margin_x
     avatar_y = top_padding
-    if os.path.exists("logo.png"):
+
+    logo_file = LOGO_PATH if os.path.exists(LOGO_PATH) else ("logo.png" if os.path.exists("logo.png") else None)
+    if logo_file:
         try:
-            logo = Image.open("logo.png").convert("RGBA").resize((avatar_size, avatar_size))
+            logo_img = Image.open(logo_file).convert("RGBA").resize((avatar_size, avatar_size), Image.Resampling.LANCZOS)
             mask = Image.new("L", (avatar_size, avatar_size), 0)
             ImageDraw.Draw(mask).ellipse((0, 0, avatar_size, avatar_size), fill=255)
-            img.paste(logo, (avatar_x, avatar_y), mask)
-        except Exception:
-            pass
+            img.paste(logo_img, (avatar_x, avatar_y), mask)
+        except Exception as e:
+            print(f"⚠️ Error carregant el logo: {e}")
     else:
-        draw.ellipse([avatar_x, avatar_y, avatar_x + avatar_size, avatar_y + avatar_size], fill=(24, 24, 24))
-        draw.text((avatar_x + 28, avatar_y + 16), "F", font=name_font, fill=(245, 200, 30))
+        # Dibuix d'emergència si no hi ha logo
+        draw.ellipse([avatar_x, avatar_y, avatar_x + avatar_size, avatar_y + avatar_size], fill=(22, 24, 28))
+        draw.text((avatar_x + 24, avatar_y + 14), "F", font=name_font, fill=(245, 200, 30))
 
-    # 2. Nom i Username
-    text_start_x = avatar_x + avatar_size + 24
+    # 2. Nom i Username (Estil Postureo)
+    text_start_x = avatar_x + avatar_size + 20
     draw.text((text_start_x, avatar_y + 4), "Feedity", font=name_font, fill=(255, 255, 255))
-    draw.text((text_start_x, avatar_y + 48), "@feedity.tv", font=handle_font, fill=(120, 130, 140))
+    draw.text((text_start_x, avatar_y + 46), "@feedity.tv", font=handle_font, fill=(113, 118, 123))
 
-    # 3. Cos del Tweet
+    # 3. Dibuix del Cos del Tweet amb suport de negretes
     text_y = avatar_y + avatar_size + 30
+    space_w = dummy_draw.textbbox((0, 0), " ", font=body_font_regular)[2]
+
     for line in wrapped_lines:
-        draw.text((margin_x, text_y), line, font=body_font, fill=(255, 255, 255))
+        if not line:
+            text_y += paragraph_gap
+            continue
+
+        cursor_x = margin_x
+        for word, is_bold, word_w in line:
+            f = body_font_bold if is_bold else body_font_regular
+            draw.text((cursor_x, text_y), word, font=f, fill=(255, 255, 255))
+            cursor_x += word_w + space_w
+
         text_y += line_height
 
     return np.array(img)
@@ -409,7 +514,7 @@ def process_video_canvas(input_path, tweet_text, output_path="final_feedity.mp4"
 
     scaled_clip = cropped_clip.resized(width=1080)
 
-    # Generem la capçalera estil Tweet
+    # Generem la capçalera estil Tweet amb Plus Jakarta Sans
     print("🎨 Renderitzant capçalera estil Tweet...")
     header_img_np = create_tweet_header_image(tweet_text, width=1080)
     header_h = header_img_np.shape[0]
