@@ -18,7 +18,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 INSTAGRAM_COOKIES_FILE = os.getenv("INSTAGRAM_COOKIES_FILE")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-TEST_MODE = False
+TEST_MODE = True  # Mode de proves activat (no marca el vídeo com a processat definitivament)
 
 # Rutes de recursos
 ASSETS_DIR = "assets"
@@ -42,6 +42,7 @@ def load_processed_ids():
 
 def save_processed_id(video_id):
     if TEST_MODE:
+        print("ℹ️ TEST_MODE actiu: No es desa l'ID a processed_videos.json")
         return
     history = load_processed_ids()
     if video_id not in history:
@@ -93,7 +94,6 @@ def get_jakarta_font(style="regular", size=42):
         except Exception:
             pass
 
-    # Fallback si falla
     for fallback in ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]:
         if os.path.exists(fallback):
             return ImageFont.truetype(fallback, size=size)
@@ -105,8 +105,29 @@ def get_jakarta_font(style="regular", size=42):
 # UTILITATS D'IMATGE I VISIÓ AI
 # ==========================================
 
+def clean_tweet_text(text):
+    """Elimina emojis i caràcters no renderitzables per evitar símbols estranys o línies."""
+    if not text:
+        return ""
+    # Elimina caràcters de control, emojis i símbols matemàtics
+    emoji_pattern = re.compile(
+        "["
+        "\U00010000-\U0010ffff"
+        "\u200d\u200c\u200e\u200f"
+        "\u2300-\u23ff"
+        "\u2600-\u27bf"
+        "\u2190-\u21ff"
+        "\u2200-\u22ff"
+        "\u2b50\u2b06\u2b07"
+        "]+",
+        flags=re.UNICODE
+    )
+    cleaned = emoji_pattern.sub("", text)
+    cleaned = cleaned.replace("≡", "").replace("■", "").replace("□", "")
+    return cleaned.strip()
+
+
 def extract_frame_as_image(video_path, timestamp=0.5):
-    """Extreu un fotograma del vídeo com a PIL Image."""
     cap = cv2.VideoCapture(video_path)
     cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
     success, frame = cap.read()
@@ -125,7 +146,6 @@ def image_to_base64_jpeg(image_pil):
 
 
 def analyze_with_groq_vision(image_pil, caption_raw=""):
-    """Analitza la imatge amb Groq Vision."""
     from groq import Groq
     client = Groq(api_key=GROQ_API_KEY)
 
@@ -134,10 +154,16 @@ def analyze_with_groq_vision(image_pil, caption_raw=""):
         "1. OCR / Read the header text, tweet, or meme text visible in the image.\n"
         "2. Identify the original author/account handle (e.g. @username from the avatar/watermark or caption). If none, set 'Unknown'.\n"
         "3. PARAPHRASE the text into a clean, viral, natural tweet/post text in ENGLISH structured into 1 or 2 distinct short paragraphs separated by a blank line (\\n\\n).\n"
-        "4. EMPHASIZE 2-4 key punchline words or important phrases using markdown asterisks **like this** so they will appear in bold.\n"
-        "5. Generate an engaging Instagram/TikTok caption in English with a Call to Action and 4-6 viral hashtags.\n\n"
+        "   IMPORTANT: DO NOT USE ANY EMOJIS OR UNICODE SYMBOLS in 'tweet_text'. ONLY STANDARD LETTERS, NUMBERS, AND PUNCTUATION.\n"
+        "   EMPHASIZE 2-4 key punchline words using markdown asterisks **like this**.\n"
+        "4. Generate an EXTENSIVE, engaging, high-quality Instagram/TikTok caption in English. It must include:\n"
+        "   - An intriguing hook\n"
+        "   - Detailed backstory / interesting facts explaining the context of what happens in the video\n"
+        "   - Original source credit line (e.g. 'Source: @author' or 'Credit: @author')\n"
+        "   - Engaging Call to Action (CTA)\n"
+        "   - 8-12 targeted viral hashtags.\n\n"
         "Return ONLY a JSON object with this exact structure:\n"
-        '{"credits": "@author", "tweet_text": "First line hook\\n\\nSecond line with **bold emphasis** on punchline", "generated_caption": "Caption with #hashtags..."}'
+        '{"credits": "@author", "tweet_text": "First line hook\\n\\nSecond line with **bold emphasis**.", "generated_caption": "Detailed long caption with background, credit, CTA, and #hashtags"}'
     )
     
     if caption_raw:
@@ -168,7 +194,7 @@ def analyze_with_groq_vision(image_pil, caption_raw=""):
             data = json.loads(completion.choices[0].message.content)
             return (
                 data.get("credits", "Unknown"),
-                data.get("tweet_text", ""),
+                clean_tweet_text(data.get("tweet_text", "")),
                 data.get("generated_caption", "")
             )
         except Exception as e:
@@ -178,7 +204,6 @@ def analyze_with_groq_vision(image_pil, caption_raw=""):
 
 
 def analyze_with_gemini_vision(image_pil, caption_raw=""):
-    """Fallback amb Google Gemini (gemini-3.6-flash / gemini-2.0-flash)."""
     from google import genai
     from google.genai import types
     
@@ -188,8 +213,14 @@ def analyze_with_gemini_vision(image_pil, caption_raw=""):
     1. Read the header text/tweet in the image.
     2. Identify original creator handle (@user).
     3. Paraphrase the text into natural English tweet style structured into 1 or 2 short paragraphs (\\n\\n).
-    4. Highlight 2-4 key punchline words in **bold** using markdown asterisks (**bold words**).
-    5. Generate viral Instagram caption with hashtags.
+       CRITICAL: DO NOT INCLUDE ANY EMOJIS OR UNICODE SYMBOLS in 'tweet_text'.
+       Highlight 2-4 key punchline words in **bold** using markdown asterisks (**bold words**).
+    4. Generate an EXTENSIVE, engaging Instagram/TikTok caption in English. Include:
+       - Captivating hook
+       - Detailed explanation/facts about what's happening in the video
+       - Explicit credit (e.g. 'Credit: @author')
+       - Call to Action (CTA)
+       - 8-12 relevant viral hashtags.
     Return JSON: {"credits": "@author", "tweet_text": "...", "generated_caption": "..."}
     """
     
@@ -211,7 +242,7 @@ def analyze_with_gemini_vision(image_pil, caption_raw=""):
             data = json.loads(res.text)
             return (
                 data.get("credits", "Unknown"),
-                data.get("tweet_text", ""),
+                clean_tweet_text(data.get("tweet_text", "")),
                 data.get("generated_caption", "")
             )
         except Exception as e:
@@ -240,10 +271,6 @@ def analyze_content(image_pil, caption_raw=""):
 # ==========================================
 
 def tokenize_markdown_text(text):
-    """
-    Descompon el text amb format markdown (**bold**) en una llista de tokens:
-    [(word, is_bold), ...]
-    """
     paragraphs = text.split("\n")
     tokenized_paragraphs = []
 
@@ -271,13 +298,12 @@ def tokenize_markdown_text(text):
 
 
 def wrap_tokenized_text(tokenized_paragraphs, regular_font, bold_font, max_width, draw):
-    """Calcula el salt de línia tenint en compte les amplades específiques de les negretes."""
     all_lines = []
     space_w_reg = draw.textbbox((0, 0), " ", font=regular_font)[2]
 
     for para_tokens in tokenized_paragraphs:
         if not para_tokens:
-            all_lines.append([])  # Línia buida per al paràgraf
+            all_lines.append([])
             continue
 
         current_line = []
@@ -309,16 +335,9 @@ def wrap_tokenized_text(tokenized_paragraphs, regular_font, bold_font, max_width
 
 
 def create_tweet_header_image(tweet_text, width=1080):
-    """
-    Genera la capçalera estil Tweet idèntica a la plantilla de referència:
-    - Logo des d'assets/logo.png
-    - Tipografia Plus Jakarta Sans
-    - Suport de paraules en negreta (**bold**)
-    """
     margin_x = 75
     max_text_width = width - (margin_x * 2)
 
-    # Tipografies Plus Jakarta Sans
     name_font = get_jakarta_font("semibold", size=38)
     handle_font = get_jakarta_font("regular", size=32)
     body_font_regular = get_jakarta_font("regular", size=44)
@@ -327,14 +346,12 @@ def create_tweet_header_image(tweet_text, width=1080):
     dummy_img = Image.new("RGBA", (1, 1))
     dummy_draw = ImageDraw.Draw(dummy_img)
 
-    # Tokenització i maquetació del text
     tokenized = tokenize_markdown_text(tweet_text)
     wrapped_lines = wrap_tokenized_text(tokenized, body_font_regular, body_font_bold, max_text_width, dummy_draw)
 
     line_height = 62
     paragraph_gap = 26
     
-    # Càlcul de l'alçada total del text
     body_height = 0
     for line in wrapped_lines:
         if not line:
@@ -347,11 +364,10 @@ def create_tweet_header_image(tweet_text, width=1080):
     bottom_padding = 40
     header_height = top_padding + avatar_size + 30 + body_height + bottom_padding
 
-    # Crear fons negre
     img = Image.new("RGBA", (width, header_height), (0, 0, 0, 255))
     draw = ImageDraw.Draw(img)
 
-    # 1. Avatar Circular (Llegeix assets/logo.png)
+    # 1. Avatar Circular
     avatar_x = margin_x
     avatar_y = top_padding
 
@@ -365,16 +381,15 @@ def create_tweet_header_image(tweet_text, width=1080):
         except Exception as e:
             print(f"⚠️ Error carregant el logo: {e}")
     else:
-        # Dibuix d'emergència si no hi ha logo
         draw.ellipse([avatar_x, avatar_y, avatar_x + avatar_size, avatar_y + avatar_size], fill=(22, 24, 28))
         draw.text((avatar_x + 24, avatar_y + 14), "F", font=name_font, fill=(245, 200, 30))
 
-    # 2. Nom i Username (Estil Postureo)
+    # 2. Nom i Username
     text_start_x = avatar_x + avatar_size + 20
     draw.text((text_start_x, avatar_y + 4), "Feedity", font=name_font, fill=(255, 255, 255))
     draw.text((text_start_x, avatar_y + 46), "@feedity.tv", font=handle_font, fill=(113, 118, 123))
 
-    # 3. Dibuix del Cos del Tweet amb suport de negretes
+    # 3. Dibuix del Cos del Tweet
     text_y = avatar_y + avatar_size + 30
     space_w = dummy_draw.textbbox((0, 0), " ", font=body_font_regular)[2]
 
@@ -514,14 +529,13 @@ def process_video_canvas(input_path, tweet_text, output_path="final_feedity.mp4"
 
     scaled_clip = cropped_clip.resized(width=1080)
 
-    # Generem la capçalera estil Tweet amb Plus Jakarta Sans
-    print("🎨 Renderitzant capçalera estil Tweet...")
+    print("🎨 Renderitzant capçalera estil Tweet amb Plus Jakarta Sans...")
     header_img_np = create_tweet_header_image(tweet_text, width=1080)
     header_h = header_img_np.shape[0]
 
     header_clip = ImageClip(header_img_np).with_duration(scaled_clip.duration)
 
-    # Posicionament
+    # Posicionament: Capçalera a dalt, vídeo just a sota
     header_clip = header_clip.with_position(("center", 180))
     video_y_pos = 180 + header_h + 10
     video_positioned = scaled_clip.with_position(("center", video_y_pos))
@@ -543,7 +557,7 @@ def process_video_canvas(input_path, tweet_text, output_path="final_feedity.mp4"
 
 
 # ==========================================
-# NOTIFICACIÓ TELEGRAM
+# NOTIFICACIÓ TELEGRAM (ENVIAMENT EN 2 MISSATGES)
 # ==========================================
 
 def send_telegram_notification(video_path, tweet_text, credits, generated_caption, video_id):
@@ -555,32 +569,44 @@ def send_telegram_notification(video_path, tweet_text, credits, generated_captio
     safe_credits = html.escape(credits or "Unknown")
     safe_video_id = html.escape(video_id or "")
 
-    max_caption_len = 650
-    if len(generated_caption) > max_caption_len:
-        generated_caption = generated_caption[:max_caption_len] + "..."
-    safe_caption = html.escape(generated_caption)
-
-    message_html = (
+    # 1. Enviar el vídeo amb el resum
+    video_caption = (
         f"🎬 <b>NOU VÍDEO PROCESSAT PER A FEEDITY</b>\n\n"
         f"📌 <b>Tweet Text</b>:\n<i>{safe_tweet}</i>\n\n"
-        f"👤 <b>Crèdits Originals</b>: {safe_credits}\n"
-        f"🆔 <b>ID</b>: <code>{safe_video_id}</code>\n\n"
-        f"📝 <b>CAPTION PER PUBLICAR</b>:\n{safe_caption}"
+        f"👤 <b>Font Original</b>: {safe_credits}\n"
+        f"🆔 <b>ID</b>: <code>{safe_video_id}</code>"
     )
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
+    url_video = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
     with open(video_path, "rb") as video_file:
         files = {"video": video_file}
         data = {
             "chat_id": TELEGRAM_CHAT_ID, 
-            "caption": message_html,
+            "caption": video_caption,
             "parse_mode": "HTML"
         }
-        res = requests.post(url, data=data, files=files)
-        if res.status_code == 200:
-            print("🚀 Vídeo i dades enviats correctament a Telegram!")
+        res_video = requests.post(url_video, data=data, files=files)
+        if res_video.status_code == 200:
+            print("🚀 Vídeo enviat correctament a Telegram!")
         else:
-            print(f"❌ Error en enviar a Telegram: {res.text}")
+            print(f"❌ Error en enviar el vídeo a Telegram: {res_video.text}")
+
+    # 2. Enviar el caption d'Instagram extens per separat (sense límit de caràcters)
+    url_msg = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    caption_text = (
+        f"📝 <b>CAPTION PER A PUBLICAR (COPIAR I ENGANXAR)</b>:\n\n"
+        f"<code>{html.escape(generated_caption)}</code>"
+    )
+    data_msg = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": caption_text,
+        "parse_mode": "HTML"
+    }
+    res_msg = requests.post(url_msg, data=data_msg)
+    if res_msg.status_code == 200:
+        print("📋 Caption extens enviat correctament en missatge separat!")
+    else:
+        print(f"⚠️ Error en enviar el text del caption: {res_msg.text}")
 
 
 # ==========================================
@@ -604,7 +630,7 @@ def get_reel_by_url(reel_url):
     processed_ids = load_processed_ids()
     shortcode = extract_shortcode(reel_url)
 
-    if shortcode and shortcode in processed_ids:
+    if shortcode and shortcode in processed_ids and not TEST_MODE:
         print(f"⏭️ Reel ja processat anteriorment ({shortcode}), s'omet.")
         return None, None, None, None, None
 
@@ -633,7 +659,7 @@ def get_reel_by_url(reel_url):
         return None, None, None, None, None
 
     video_id = str(info.get("id") or shortcode or reel_url)
-    if video_id in processed_ids:
+    if video_id in processed_ids and not TEST_MODE:
         print(f"⏭️ Reel ja processat anteriorment ({video_id}), s'omet.")
         return None, None, None, None, None
 
