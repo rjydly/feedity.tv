@@ -5,18 +5,23 @@ import glob
 import requests
 import numpy as np
 import cv2
-import ollama
+from PIL import Image
+import google.generativeai as genai
 import yt_dlp
 from moviepy import VideoFileClip, CompositeVideoClip, TextClip
 
-# Font utilitzada per "cremar" el titular sobre el vídeo.
+# Font utilitzada per "cremar" el titular sobre el vídeo
 HEADLINE_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 INSTAGRAM_COOKIES_FILE = os.getenv("INSTAGRAM_COOKIES_FILE")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma2:2b")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TEST_MODE = False
+
+# Configuració de Gemini
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 
 def load_processed_ids():
@@ -39,46 +44,80 @@ def save_processed_id(video_id):
             json.dump(history, f, indent=4)
 
 
-def analyze_caption_with_local_ai(caption):
-    prompt = f"""
-    Analitza aquesta descripció de xarxes socials i genera:
-    1. Els crèdits o l'autor original del vídeo (p. ex., @usuari). Si no n'hi ha, posa "Unknown".
-    2. Un títol o headline impactant de màxim 6 paraules en anglès per posar a sobre del vídeo.
-    3. Una nova descripció (caption) optimitzada per a Instagram/TikTok en anglès, amb crida a l'acció (CTA) i hashtags virals.
-
-    Descripció original: "{caption}"
-
-    Respon NOMÉS en format JSON com aquest:
-    {{"credits": "@usuari", "headline": "Titular Impactant", "generated_caption": "Text de la descripció nova amb hashtags..."}}
-    """
-    try:
-        response = ollama.chat(
-            model=OLLAMA_MODEL,
-            messages=[{'role': 'user', 'content': prompt}]
-        )
-        content = response['message']['content']
-        match = re.search(r'\{.*\}', content, re.DOTALL)
-        if match:
-            data = json.loads(match.group())
-            return (
-                data.get("credits", "Unknown"), 
-                data.get("headline", ""), 
-                data.get("generated_caption", "")
-            )
-    except Exception as e:
-        print(f"⚠️ Error en analitzar amb Ollama: {e}")
+def extract_frame_as_image(video_path, timestamp=0.5):
+    """Extreu un fotograma del vídeo com a objecte PIL Image per enviar a Gemini."""
+    cap = cv2.VideoCapture(video_path)
+    cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
+    success, frame = cap.read()
+    cap.release()
     
-    return "Unknown", "", caption
+    if success and frame is not None:
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        return Image.fromarray(frame_rgb)
+    return None
+
+
+def analyze_with_gemini_vision(image_pil, caption_raw=""):
+    """
+    Analitza la imatge del post (OCR del tweet/meme) amb Gemini Flash per:
+    1. Llegir el text del tweet/meme i parafrasejar-lo en un titular en anglès.
+    2. Detectar l'autor o compte original (ex: @postureo).
+    3. Crear una descripció optimitzada per a Instagram/TikTok.
+    """
+    if not GEMINI_API_KEY:
+        print("⚠️ GEMINI_API_KEY no configurada. S'utilitzaran valors per defecte.")
+        return "Unknown", "", caption_raw
+
+    prompt = """
+    Examine this video frame and the original post caption.
+    
+    Instructions:
+    1. OCR / Read the header text, meme text, or tweet clearly visible in the image.
+    2. Identify the original author/account handle (e.g. from the profile picture/handle shown in the image like @username, or caption). If none, set "Unknown".
+    3. PARAPHRASE the core joke/message of the text in the image into an engaging, impactful viral headline in ENGLISH (maximum 6 words). DO NOT invent random facts; base it strictly on what the image text says.
+    4. Generate a compelling, viral Instagram/TikTok caption in English based on the same message, including a Call to Action (CTA) and 4-6 relevant viral hashtags.
+
+    Return strictly a JSON object with this exact schema:
+    {
+      "credits": "@author",
+      "headline": "Punchy English Headline",
+      "generated_caption": "Engaging caption text... #hashtag1 #hashtag2"
+    }
+    """
+
+    try:
+        model = genai.GenerativeModel(
+            model_name="gemini-1.5-flash",
+            generation_config={"response_mime_type": "application/json"}
+        )
+        
+        inputs = [prompt]
+        if image_pil is not None:
+            inputs.append(image_pil)
+        if caption_raw:
+            inputs.append(f"\nOriginal video description: {caption_raw}")
+
+        response = model.generate_content(inputs)
+        data = json.loads(response.text)
+        
+        return (
+            data.get("credits", "Unknown"),
+            data.get("headline", ""),
+            data.get("generated_caption", "")
+        )
+    except Exception as e:
+        print(f"⚠️ Error en analitzar amb Gemini Vision: {e}")
+        return "Unknown", "", caption_raw
 
 
 def extract_shortcode(reel_url):
-    """Extreu el shortcode (p.ex. 'CxYz123AbCd') d'una URL de reel/post d'Instagram."""
+    """Extreu el shortcode d'una URL de reel/post d'Instagram."""
     match = re.search(r"instagram\.com/(?:reel|reels|p|tv)/([A-Za-z0-9_-]+)", reel_url)
     return match.group(1) if match else None
 
 
 def _cleanup_temp_input():
-    """Elimina restes de descàrregues anteriors (temp_input.* de qualsevol extensió)."""
+    """Elimina fitxers temporals anteriors."""
     for f in glob.glob("temp_input.*"):
         try:
             os.remove(f)
@@ -87,7 +126,7 @@ def _cleanup_temp_input():
 
 
 def get_reel_by_url(reel_url):
-    """Processa un reel a partir de la seva URL directa, via yt-dlp."""
+    """Descarrega el reel amb yt-dlp i n'extreu la informació."""
     processed_ids = load_processed_ids()
     shortcode = extract_shortcode(reel_url)
 
@@ -96,7 +135,6 @@ def get_reel_by_url(reel_url):
         return None, None, None, None, None
 
     print(f"⬇️ Descarregant reel amb yt-dlp: {reel_url}")
-
     _cleanup_temp_input()
 
     ydl_opts = {
@@ -115,8 +153,6 @@ def get_reel_by_url(reel_url):
             info = ydl.extract_info(reel_url, download=True)
     except yt_dlp.utils.DownloadError as e:
         print(f"❌ Error en descarregar el reel amb yt-dlp: {e}")
-        print("   💡 Si l'error menciona 'login required' o 'rate-limit', assegura't que "
-              "INSTAGRAM_COOKIES_FILE conté un cookies.txt vàlid.")
         return None, None, None, None, None
     except Exception as e:
         print(f"❌ Error inesperat amb yt-dlp: {e}")
@@ -138,8 +174,9 @@ def get_reel_by_url(reel_url):
 
     caption_raw = info.get("description") or ""
 
-    print(f"🤖 Analitzant i generant contingut amb Ollama ({OLLAMA_MODEL})...")
-    credits, headline, generated_caption = analyze_caption_with_local_ai(caption_raw)
+    print("🤖 Analitzant contingut visual i text amb Gemini Vision...")
+    frame_image = extract_frame_as_image(downloaded_path, timestamp=0.5)
+    credits, headline, generated_caption = analyze_with_gemini_vision(frame_image, caption_raw)
 
     return downloaded_path, video_id, credits, headline, generated_caption
 
@@ -149,7 +186,6 @@ def get_reel_by_url(reel_url):
 # ==========================================
 
 def detect_background_color(frame):
-    """Detecta el color de fons mostrejant els extrems superior i inferior centrals."""
     h, w, _ = frame.shape
     top_sample = frame[0:15, w//4:3*w//4]
     bottom_sample = frame[h-15:h, w//4:3*w//4]
@@ -158,7 +194,6 @@ def detect_background_color(frame):
 
 
 def get_longest_consecutive_run(bool_array):
-    """Calcula la seqüència contínua més llarga de valors True en un array 1D."""
     max_run = 0
     current_run = 0
     for val in bool_array:
@@ -172,16 +207,13 @@ def get_longest_consecutive_run(bool_array):
 
 
 def find_video_box_in_frame(frame, color_diff_threshold=30, min_width_ratio=0.65, min_height_ratio=0.65):
-    """
-    Troba el requadre rectangular del vídeo real ignorant text, avatars i fons plans.
-    """
     h, w, _ = frame.shape
     bg_color = detect_background_color(frame)
 
     diff = np.max(np.abs(frame.astype(np.float32) - bg_color), axis=2)
     foreground_mask = diff > color_diff_threshold
 
-    # 1. Escaneig Vertical (ignora text/logos que no ocupen prou amplada contínua)
+    # 1. Escaneig Vertical (ignora text o logos que no ocupen una franja contínua ampla)
     min_continuous_px = int(w * min_width_ratio)
     valid_y = []
 
@@ -199,7 +231,7 @@ def find_video_box_in_frame(frame, color_diff_threshold=30, min_width_ratio=0.65
     if (y2 - y1) < 100:
         return None
 
-    # 2. Escaneig Horitzontal dins de la franja y1:y2
+    # 2. Escaneig Horitzontal dins de y1:y2
     video_region_mask = foreground_mask[y1:y2, :]
     region_h = y2 - y1
     min_col_pixels = int(region_h * min_height_ratio)
@@ -220,10 +252,6 @@ def find_video_box_in_frame(frame, color_diff_threshold=30, min_width_ratio=0.65
 
 
 def crop_content_bounding_box(clip, num_samples=6):
-    """
-    Mostreja diversos fotogrames al llarg del vídeo i obté la mediana del requadre
-    on hi ha contingut real en moviment/vídeo.
-    """
     duration = clip.duration
     if not duration or duration <= 0:
         return None
@@ -246,7 +274,6 @@ def crop_content_bounding_box(clip, num_samples=6):
     boxes = np.array(boxes)
     median_box = np.median(boxes, axis=0).astype(int)
     x, y, w, h = median_box
-
     return (int(x), int(y), int(w), int(h))
 
 
@@ -255,7 +282,6 @@ def crop_content_bounding_box(clip, num_samples=6):
 # ==========================================
 
 def build_headline_clip(headline, duration, canvas_width=1080):
-    """Crea el TextClip del titular que es posiciona a sobre del vídeo."""
     if not headline:
         return None
     try:
@@ -286,7 +312,6 @@ def process_video_canvas(input_path, headline, output_path="final_feedity.mp4"):
     min_area_ratio = 0.10
     if bbox and (bbox[2] * bbox[3]) >= min_area_ratio * frame_w * frame_h:
         x, y, w, h = bbox
-        # Marge de seguretat del 1%
         margin_x = int(w * 0.01)
         margin_y = int(h * 0.01)
         x1 = max(0, x - margin_x)
@@ -341,7 +366,6 @@ def send_telegram_notification(video_path, headline, credits, generated_caption,
         f"📝 *CAPTION GENERAT*:\n{generated_caption}"
     )
 
-    # Telegram sendVideo té un límit estricte de 1024 caràcters per al caption
     if len(message_text) > 1024:
         message_text = message_text[:1020] + "..."
     
