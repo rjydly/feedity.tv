@@ -3,12 +3,12 @@ import re
 import json
 import glob
 import html
+import base64
+from io import BytesIO
 import requests
 import numpy as np
 import cv2
 from PIL import Image
-from google import genai
-from google.genai import types
 import yt_dlp
 from moviepy import VideoFileClip, CompositeVideoClip, TextClip
 
@@ -18,11 +18,9 @@ HEADLINE_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 INSTAGRAM_COOKIES_FILE = os.getenv("INSTAGRAM_COOKIES_FILE")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-TEST_MODE = True
-
-# Inicialització del client Gemini amb el nou SDK oficial
-gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+TEST_MODE = False
 
 
 def load_processed_ids():
@@ -46,7 +44,7 @@ def save_processed_id(video_id):
 
 
 def extract_frame_as_image(video_path, timestamp=0.5):
-    """Extreu un fotograma del vídeo com a objecte PIL Image per enviar a Gemini."""
+    """Extreu un fotograma del vídeo com a objecte PIL Image."""
     cap = cv2.VideoCapture(video_path)
     cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
     success, frame = cap.read()
@@ -58,31 +56,73 @@ def extract_frame_as_image(video_path, timestamp=0.5):
     return None
 
 
-def analyze_with_gemini_vision(image_pil, caption_raw=""):
-    """Analitza el contingut visual i text amb Gemini Flash (nou SDK google-genai)."""
-    if not gemini_client:
-        print("⚠️ GEMINI_API_KEY no configurada. S'utilitzaran valors per defecte.")
-        return "Unknown", "", caption_raw
+def image_to_base64_jpeg(image_pil):
+    """Converteix una imatge PIL a base64 JPEG."""
+    buffered = BytesIO()
+    image_pil.save(buffered, format="JPEG", quality=85)
+    return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
+
+def analyze_with_groq_vision(image_pil, caption_raw=""):
+    """Analitza la imatge amb LLaMA 3.2 Vision a Groq (ultraràpid i gratuït)."""
+    from groq import Groq
+    client = Groq(api_key=GROQ_API_KEY)
+
+    prompt = (
+        "Examine this video frame and the original caption.\n"
+        "1. OCR/Read the header text, meme text, or tweet clearly visible in the image.\n"
+        "2. Identify the original author/account handle (e.g. from the avatar/handle like @username, or caption). If none, set 'Unknown'.\n"
+        "3. PARAPHRASE the core joke/message of the text in the image into an engaging, impactful viral headline in ENGLISH (maximum 6 words).\n"
+        "4. Generate a compelling, viral Instagram/TikTok caption in English based on the same message with a CTA and 4-6 hashtags.\n\n"
+        "Return ONLY a JSON object with keys: credits, headline, generated_caption."
+    )
+    
+    if caption_raw:
+        prompt += f"\nOriginal video description: {caption_raw}"
+
+    content = [{"type": "text", "text": prompt}]
+    if image_pil is not None:
+        b64 = image_to_base64_jpeg(image_pil)
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
+        })
+
+    for model_name in ["llama-3.2-11b-vision-preview", "llama-3.2-90b-vision-preview"]:
+        try:
+            print(f"🧠 Analitzant amb Groq Vision ({model_name})...")
+            completion = client.chat.completions.create(
+                model=model_name,
+                messages=[{"role": "user", "content": content}],
+                response_format={"type": "json_object"},
+                temperature=0.7
+            )
+            data = json.loads(completion.choices[0].message.content)
+            return (
+                data.get("credits", "Unknown"),
+                data.get("headline", ""),
+                data.get("generated_caption", "")
+            )
+        except Exception as e:
+            print(f"ℹ️ Groq {model_name} error: {e}")
+            continue
+    return None
+
+
+def analyze_with_gemini_vision(image_pil, caption_raw=""):
+    """Fallback amb Google Gemini utilitzant el model recomanat."""
+    from google import genai
+    from google.genai import types
+    
+    client = genai.Client(api_key=GEMINI_API_KEY)
     prompt = """
     Examine this video frame and the original post caption.
-    
-    Instructions:
-    1. OCR / Read the header text, meme text, or tweet clearly visible in the image.
-    2. Identify the original author/account handle (e.g. from the profile picture/handle shown in the image like @username, or caption). If none, set "Unknown".
-    3. PARAPHRASE the core joke/message of the text in the image into an engaging, impactful viral headline in ENGLISH (maximum 6 words). DO NOT invent random facts; base it strictly on what the image text says.
-    4. Generate a compelling, viral Instagram/TikTok caption in English based on the same message, including a Call to Action (CTA) and 4-6 relevant viral hashtags.
-
-    Return strictly a JSON object with this exact schema:
-    {
-      "credits": "@author",
-      "headline": "Punchy English Headline",
-      "generated_caption": "Engaging caption text... #hashtag1 #hashtag2"
-    }
+    1. OCR / Read the header text, meme text, or tweet visible in the image.
+    2. Identify original author (@username). If none, set "Unknown".
+    3. PARAPHRASE the core message into an impactful viral headline in ENGLISH (max 6 words).
+    4. Generate a viral Instagram/TikTok caption in English with CTA and hashtags.
+    Return JSON: {"credits": "@author", "headline": "...", "generated_caption": "..."}
     """
-
-    # Llista de models compatibles en ordre de preferència
-    candidate_models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
     
     contents = [prompt]
     if image_pil is not None:
@@ -90,29 +130,39 @@ def analyze_with_gemini_vision(image_pil, caption_raw=""):
     if caption_raw:
         contents.append(f"\nOriginal video description: {caption_raw}")
 
-    config = types.GenerateContentConfig(
-        response_mime_type="application/json"
-    )
-
-    for model_name in candidate_models:
+    for model_name in ["gemini-3.6-flash", "gemini-2.0-flash"]:
         try:
-            print(f"🧠 Provant model Gemini: {model_name}...")
-            response = gemini_client.models.generate_content(
+            print(f"🧠 Analitzant amb Gemini ({model_name})...")
+            res = client.models.generate_content(
                 model=model_name,
                 contents=contents,
-                config=config
+                config=types.GenerateContentConfig(response_mime_type="application/json")
             )
-            data = json.loads(response.text)
+            data = json.loads(res.text)
             return (
                 data.get("credits", "Unknown"),
                 data.get("headline", ""),
                 data.get("generated_caption", "")
             )
         except Exception as e:
-            print(f"ℹ️ Model {model_name} no disponible ({e}), provant següent...")
+            print(f"ℹ️ Gemini {model_name} error: {e}")
             continue
+    return None
 
-    print("⚠️ No s'ha pogut obtenir resposta de cap model de Gemini.")
+
+def analyze_content(image_pil, caption_raw=""):
+    """Punt d'entrada d'anàlisi: Prova Groq primer, si no Gemini, si no valors per defecte."""
+    if GROQ_API_KEY:
+        res = analyze_with_groq_vision(image_pil, caption_raw)
+        if res:
+            return res
+
+    if GEMINI_API_KEY:
+        res = analyze_with_gemini_vision(image_pil, caption_raw)
+        if res:
+            return res
+
+    print("⚠️ No s'ha pogut utilitzar cap API de Visió. S'utilitzen valors per defecte.")
     return "Unknown", "", caption_raw
 
 
@@ -177,9 +227,9 @@ def get_reel_by_url(reel_url):
 
     caption_raw = info.get("description") or ""
 
-    print("🤖 Analitzant contingut visual i text amb Gemini Vision...")
+    print("🤖 Analitzant contingut visual i text del reel...")
     frame_image = extract_frame_as_image(downloaded_path, timestamp=0.5)
-    credits, headline, generated_caption = analyze_with_gemini_vision(frame_image, caption_raw)
+    credits, headline, generated_caption = analyze_content(frame_image, caption_raw)
 
     return downloaded_path, video_id, credits, headline, generated_caption
 
