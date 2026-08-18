@@ -3,6 +3,7 @@ import re
 import json
 import glob
 import html
+import time
 import base64
 from io import BytesIO
 import requests
@@ -25,7 +26,7 @@ ASSETS_DIR = "assets"
 FONTS_DIR = os.path.join(ASSETS_DIR, "fonts")
 LOGO_PATH = os.path.join(ASSETS_DIR, "logo.png")
 
-# Text de drets que anirà sempre al final de cada caption
+# Text de drets obligatori al final del caption
 DISCLAIMER_TEXT = "All rights belong to the respective owner. DM for credit or removal."
 
 
@@ -82,7 +83,6 @@ def ensure_fonts():
 
 
 def get_jakarta_font(style="regular", size=42):
-    """Carrega Plus Jakarta Sans amb fallback segur."""
     ensure_fonts()
     font_map = {
         "bold": os.path.join(FONTS_DIR, "PlusJakartaSans-Bold.ttf"),
@@ -109,7 +109,7 @@ def get_jakarta_font(style="regular", size=42):
 # ==========================================
 
 def clean_tweet_text(text):
-    """Elimina emojis i caràcters no renderitzables per evitar símbols estranys o línies."""
+    """Elimina emojis i caràcters no renderitzables."""
     if not text:
         return ""
     emoji_pattern = re.compile(
@@ -180,11 +180,21 @@ Return strictly a JSON object with this format:
 
 
 def format_final_caption(generated_caption):
-    """Garanteix que el text de drets estigui sempre al final de tot del caption."""
     caption = (generated_caption or "").strip()
     if DISCLAIMER_TEXT not in caption:
         caption = f"{caption}\n\n{DISCLAIMER_TEXT}" if caption else DISCLAIMER_TEXT
     return caption
+
+
+def parse_json_safely(raw_text):
+    """Extreu i parseja JSON de manera robusta."""
+    try:
+        return json.loads(raw_text)
+    except Exception:
+        match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+        if match:
+            return json.loads(match.group())
+    return None
 
 
 def analyze_with_groq_vision(image_pil, caption_raw=""):
@@ -204,25 +214,27 @@ def analyze_with_groq_vision(image_pil, caption_raw=""):
         })
 
     candidate_models = [
-        "meta-llama/llama-4-scout-17b-16e-instruct",
-        "qwen/qwen3.6-27b"
+        "qwen/qwen3.6-27b",
+        "meta-llama/llama-4-scout-17b-16e-instruct"
     ]
 
     for model_name in candidate_models:
         try:
-            print(f"🧠 Analitzant amb Groq Vision ({model_name})...")
+            print(f"🧠 Provant Groq Vision ({model_name})...")
+            # Provem primer sense forçar mode json rígid per evitar errors 400 de validació
             completion = client.chat.completions.create(
                 model=model_name,
                 messages=[{"role": "user", "content": content}],
-                response_format={"type": "json_object"},
                 temperature=0.6
             )
-            data = json.loads(completion.choices[0].message.content)
-            return (
-                data.get("credits", ""),
-                clean_tweet_text(data.get("tweet_text", "")),
-                format_final_caption(data.get("generated_caption", ""))
-            )
+            raw_text = completion.choices[0].message.content
+            data = parse_json_safely(raw_text)
+            if data and data.get("tweet_text"):
+                return (
+                    data.get("credits", ""),
+                    clean_tweet_text(data.get("tweet_text", "")),
+                    format_final_caption(data.get("generated_caption", ""))
+                )
         except Exception as e:
             print(f"ℹ️ Groq error ({model_name}): {e}")
             continue
@@ -245,38 +257,74 @@ def analyze_with_gemini_vision(image_pil, caption_raw=""):
     candidate_models = ["gemini-3.6-flash", "gemini-2.0-flash"]
     for model_name in candidate_models:
         try:
-            print(f"🧠 Analitzant amb Gemini ({model_name})...")
+            print(f"🧠 Provant Gemini ({model_name})...")
             res = client.models.generate_content(
                 model=model_name,
                 contents=contents,
                 config=types.GenerateContentConfig(response_mime_type="application/json")
             )
-            data = json.loads(res.text)
-            return (
-                data.get("credits", ""),
-                clean_tweet_text(data.get("tweet_text", "")),
-                format_final_caption(data.get("generated_caption", ""))
-            )
+            data = parse_json_safely(res.text)
+            if data and data.get("tweet_text"):
+                return (
+                    data.get("credits", ""),
+                    clean_tweet_text(data.get("tweet_text", "")),
+                    format_final_caption(data.get("generated_caption", ""))
+                )
         except Exception as e:
             print(f"ℹ️ Gemini error ({model_name}): {e}")
             continue
     return None
 
 
-def analyze_content(image_pil, caption_raw=""):
-    if GROQ_API_KEY:
-        res = analyze_with_groq_vision(image_pil, caption_raw)
-        if res:
-            return res
+def send_telegram_alert(error_detail, reel_url=""):
+    """Envia una alerta immediata si les IAs no responen després dels 5 intents."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    url_msg = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    alert_text = (
+        f"🚨 <b>ALERTA CRÍTICA FEEDITY PIPELINE</b> 🚨\n\n"
+        f"❌ <b>Error:</b> Cap servei d'Intel·ligència Artificial (Gemini / Groq) ha respost després de <b>5 intents</b> (esperant 1 minut entre cadascun).\n\n"
+        f"🔗 <b>Reel afectat:</b> {html.escape(reel_url)}\n\n"
+        f"⚠️ <i>El processament s'ha aturat per evitar publicar un vídeo buit o erroni.</i>\n\n"
+        f"📋 <b>Detalls de l'error:</b>\n<code>{html.escape(str(error_detail)[:350])}</code>"
+    )
+    data_msg = {
+        "chat_id": TELEGRAM_CHAT_ID, 
+        "text": alert_text,
+        "parse_mode": "HTML"
+    }
+    try:
+        requests.post(url_msg, data=data_msg, timeout=10)
+        print("🚨 Alerta d'error enviada a Telegram!")
+    except Exception as e:
+        print(f"⚠️ Error enviant l'alerta a Telegram: {e}")
 
-    if GEMINI_API_KEY:
-        res = analyze_with_gemini_vision(image_pil, caption_raw)
-        if res:
-            return res
 
-    print("⚠️ No s'ha pogut utilitzar cap API de Visió. S'utilitzen valors per defecte.")
-    default_caption = format_final_caption(caption_raw)
-    return "", "Check **this out**!\n\nUnbelievable moment captured on camera.", default_caption
+def analyze_content_with_retry(image_pil, caption_raw="", reel_url="", max_retries=5, delay_seconds=60):
+    """
+    Intenta analitzar el contingut amb Groq i Gemini.
+    Si fallen (ex: error 503 de saturació), s'espera 1 minut i torna a provar fins a 5 vegades.
+    """
+    for attempt in range(1, max_retries + 1):
+        print(f"\n🤖 [Intent {attempt}/{max_retries}] Analitzant contingut visual i text amb IA...")
+
+        if GROQ_API_KEY:
+            res = analyze_with_groq_vision(image_pil, caption_raw)
+            if res:
+                return res
+
+        if GEMINI_API_KEY:
+            res = analyze_with_gemini_vision(image_pil, caption_raw)
+            if res:
+                return res
+
+        if attempt < max_retries:
+            print(f"⏳ Totes les APIs han fallat o estan saturades (503). Esperant {delay_seconds} segons abans del següent intent...")
+            time.sleep(delay_seconds)
+
+    print(f"❌ La IA no ha respost després de {max_retries} intents.")
+    send_telegram_alert("Totes les APIs de visió (Groq i Gemini) han fallat per saturació persistent.", reel_url)
+    return None, None, None
 
 
 # ==========================================
@@ -402,7 +450,7 @@ def create_tweet_header_image(tweet_text, width=1080):
     draw.text((text_start_x, avatar_y + 4), "Feedity", font=name_font, fill=(255, 255, 255))
     draw.text((text_start_x, avatar_y + 46), "@feedity.tv", font=handle_font, fill=(113, 118, 123))
 
-    # 3. Dibuix del Cos del Tweet
+    # 3. Cos del Tweet
     text_y = avatar_y + avatar_size + 30
     space_w = dummy_draw.textbbox((0, 0), " ", font=body_font_regular)[2]
 
@@ -548,7 +596,7 @@ def process_video_canvas(input_path, tweet_text, output_path="final_feedity.mp4"
 
     header_clip = ImageClip(header_img_np).with_duration(scaled_clip.duration)
 
-    # Posicionament: Capçalera a dalt, vídeo just a sota
+    # Posicionament
     header_clip = header_clip.with_position(("center", 180))
     video_y_pos = 180 + header_h + 10
     video_positioned = scaled_clip.with_position(("center", video_y_pos))
@@ -570,7 +618,7 @@ def process_video_canvas(input_path, tweet_text, output_path="final_feedity.mp4"
 
 
 # ==========================================
-# NOTIFICACIÓ TELEGRAM (ENVIAMENT EN 2 MISSATGES)
+# NOTIFICACIÓ TELEGRAM
 # ==========================================
 
 def send_telegram_notification(video_path, tweet_text, credits, generated_caption, video_id):
@@ -604,7 +652,7 @@ def send_telegram_notification(video_path, tweet_text, credits, generated_captio
         else:
             print(f"❌ Error en enviar el vídeo a Telegram: {res_video.text}")
 
-    # 2. Enviar el caption d'Instagram extens llest per copiar (amb crèdits i drets al final)
+    # 2. Enviar el caption extens per separat
     url_msg = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     caption_text = (
         f"📝 <b>CAPTION PER A PUBLICAR (COPIAR I ENGANXAR)</b>:\n\n"
@@ -687,9 +735,19 @@ def get_reel_by_url(reel_url):
 
     caption_raw = info.get("description") or ""
 
-    print("🤖 Analitzant contingut visual i text del reel...")
+    # Extracció del fotograma i anàlisi amb bucle de 5 reintents
     frame_image = extract_frame_as_image(downloaded_path, timestamp=0.5)
-    credits, tweet_text, generated_caption = analyze_content(frame_image, caption_raw)
+    credits, tweet_text, generated_caption = analyze_content_with_retry(
+        frame_image, 
+        caption_raw=caption_raw, 
+        reel_url=reel_url,
+        max_retries=5, 
+        delay_seconds=60
+    )
+
+    # Si després dels 5 intents no hi ha resposta, retornem None per aturar el procés
+    if not tweet_text:
+        return None, None, None, None, None
 
     return downloaded_path, video_id, credits, tweet_text, generated_caption
 
@@ -709,14 +767,14 @@ def main():
         print(f"\n🚀 Processant reel: {reel_url}")
         video_file, video_id, credits, tweet_text, generated_caption = get_reel_by_url(reel_url)
 
-        if video_file:
+        if video_file and tweet_text:
             process_video_canvas(video_file, tweet_text, "final_feedity.mp4")
             send_telegram_notification("final_feedity.mp4", tweet_text, credits, generated_caption, video_id)
             save_processed_id(video_id)
             print("✅ Procés finalitzat amb èxit!")
             break
         else:
-            print(f"⚠️ Reel omès o sense contingut nou: {reel_url}")
+            print(f"⚠️ Reel omès o cancel·lat per error d'IA: {reel_url}")
 
 
 if __name__ == "__main__":
