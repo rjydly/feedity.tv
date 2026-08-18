@@ -2,6 +2,7 @@ import os
 import re
 import json
 import glob
+import html
 import requests
 import numpy as np
 import cv2
@@ -57,13 +58,24 @@ def extract_frame_as_image(video_path, timestamp=0.5):
     return None
 
 
+def get_best_available_gemini_model():
+    """Tria dinàmicament el millor model Flash actiu per evitar errors 404."""
+    try:
+        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        # Preferència per versions Flash recents
+        for preferred in ["models/gemini-2.0-flash", "models/gemini-1.5-flash-latest", "models/gemini-1.5-flash", "models/gemini-2.5-flash"]:
+            if preferred in models:
+                return preferred
+        for m in models:
+            if "flash" in m:
+                return m
+        return models[0] if models else "gemini-2.0-flash"
+    except Exception:
+        return "gemini-2.0-flash"
+
+
 def analyze_with_gemini_vision(image_pil, caption_raw=""):
-    """
-    Analitza la imatge del post (OCR del tweet/meme) amb Gemini Flash per:
-    1. Llegir el text del tweet/meme i parafrasejar-lo en un titular en anglès.
-    2. Detectar l'autor o compte original (ex: @postureo).
-    3. Crear una descripció optimitzada per a Instagram/TikTok.
-    """
+    """Analitza el contingut visual i text amb Gemini Flash."""
     if not GEMINI_API_KEY:
         print("⚠️ GEMINI_API_KEY no configurada. S'utilitzaran valors per defecte.")
         return "Unknown", "", caption_raw
@@ -86,8 +98,10 @@ def analyze_with_gemini_vision(image_pil, caption_raw=""):
     """
 
     try:
+        model_name = get_best_available_gemini_model()
+        print(f"🧠 Utilitzant model: {model_name}")
         model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash",
+            model_name=model_name,
             generation_config={"response_mime_type": "application/json"}
         )
         
@@ -111,13 +125,11 @@ def analyze_with_gemini_vision(image_pil, caption_raw=""):
 
 
 def extract_shortcode(reel_url):
-    """Extreu el shortcode d'una URL de reel/post d'Instagram."""
     match = re.search(r"instagram\.com/(?:reel|reels|p|tv)/([A-Za-z0-9_-]+)", reel_url)
     return match.group(1) if match else None
 
 
 def _cleanup_temp_input():
-    """Elimina fitxers temporals anteriors."""
     for f in glob.glob("temp_input.*"):
         try:
             os.remove(f)
@@ -126,7 +138,6 @@ def _cleanup_temp_input():
 
 
 def get_reel_by_url(reel_url):
-    """Descarrega el reel amb yt-dlp i n'extreu la informació."""
     processed_ids = load_processed_ids()
     shortcode = extract_shortcode(reel_url)
 
@@ -213,7 +224,6 @@ def find_video_box_in_frame(frame, color_diff_threshold=30, min_width_ratio=0.65
     diff = np.max(np.abs(frame.astype(np.float32) - bg_color), axis=2)
     foreground_mask = diff > color_diff_threshold
 
-    # 1. Escaneig Vertical (ignora text o logos que no ocupen una franja contínua ampla)
     min_continuous_px = int(w * min_width_ratio)
     valid_y = []
 
@@ -231,7 +241,6 @@ def find_video_box_in_frame(frame, color_diff_threshold=30, min_width_ratio=0.65
     if (y2 - y1) < 100:
         return None
 
-    # 2. Escaneig Horitzontal dins de y1:y2
     video_region_mask = foreground_mask[y1:y2, :]
     region_h = y2 - y1
     min_col_pixels = int(region_h * min_height_ratio)
@@ -350,32 +359,40 @@ def process_video_canvas(input_path, headline, output_path="final_feedity.mp4"):
 
 
 # ==========================================
-# NOTIFICACIÓ TELEGRAM
+# NOTIFICACIÓ TELEGRAM (FORMAT HTML PROTEGIT)
 # ==========================================
 
 def send_telegram_notification(video_path, headline, credits, generated_caption, video_id):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("⚠️ Notificació de Telegram omessa (tokens no configurats).")
         return
+
+    # Escapem caràcters per evitar trencar el format HTML de Telegram
+    safe_headline = html.escape(headline or "Sense Títol")
+    safe_credits = html.escape(credits or "Unknown")
+    safe_video_id = html.escape(video_id or "")
+    
+    # Retallem el caption generat si és massa llarg per respectar el límit de 1024 caràcters
+    max_caption_len = 650
+    if len(generated_caption) > max_caption_len:
+        generated_caption = generated_caption[:max_caption_len] + "..."
+    safe_caption = html.escape(generated_caption)
         
-    message_text = (
-        f"🎬 *NOU VÍDEO PROCESSAT PER A FEEDITY*\n\n"
-        f"📌 *Títol*: {headline}\n"
-        f"👤 *Crèdits*: {credits}\n"
-        f"🆔 *ID*: `{video_id}`\n\n"
-        f"📝 *CAPTION GENERAT*:\n{generated_caption}"
+    message_html = (
+        f"🎬 <b>NOU VÍDEO PROCESSAT PER A FEEDITY</b>\n\n"
+        f"📌 <b>Títol</b>: {safe_headline}\n"
+        f"👤 <b>Crèdits</b>: {safe_credits}\n"
+        f"🆔 <b>ID</b>: <code>{safe_video_id}</code>\n\n"
+        f"📝 <b>CAPTION GENERAT</b>:\n{safe_caption}"
     )
 
-    if len(message_text) > 1024:
-        message_text = message_text[:1020] + "..."
-    
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
     with open(video_path, "rb") as video_file:
         files = {"video": video_file}
         data = {
             "chat_id": TELEGRAM_CHAT_ID, 
-            "caption": message_text,
-            "parse_mode": "Markdown"
+            "caption": message_html,
+            "parse_mode": "HTML"
         }
         res = requests.post(url, data=data, files=files)
         if res.status_code == 200:
