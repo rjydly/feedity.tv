@@ -18,7 +18,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 INSTAGRAM_COOKIES_FILE = os.getenv("INSTAGRAM_COOKIES_FILE")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-TEST_MODE = True  # Mode de proves activat (no marca el vídeo com a processat definitivament)
+TEST_MODE = True  # Mode de proves activat
 
 # Rutes de recursos
 ASSETS_DIR = "assets"
@@ -109,7 +109,6 @@ def clean_tweet_text(text):
     """Elimina emojis i caràcters no renderitzables per evitar símbols estranys o línies."""
     if not text:
         return ""
-    # Elimina caràcters de control, emojis i símbols matemàtics
     emoji_pattern = re.compile(
         "["
         "\U00010000-\U0010ffff"
@@ -145,29 +144,44 @@ def image_to_base64_jpeg(image_pil):
     return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
 
+AI_PROMPT_INSTRUCTIONS = """
+Examine this video frame and the original post caption carefully.
+
+RULES FOR CREDITS:
+1. Identify the TRUE ORIGINAL source/creator of the video (e.g. if the caption says "Media: @voyah__global", "Video by @creator", or shows a primary creator watermark, the credit is @voyah__global).
+2. NEVER credit the reposter / curator account that merely reposted the video (e.g. ignore accounts like @wealth, @pubity, etc. that reshare media).
+3. If no original third-party source/creator is cited, set "credits" to "".
+
+RULES FOR TWEET TEXT:
+- Paraphrase the message into a clean, viral tweet in ENGLISH structured into 1 or 2 distinct short paragraphs separated by a blank line (\\n\\n).
+- STRICTLY NO EMOJIS OR UNICODE SYMBOLS in 'tweet_text'.
+- EMPHASIZE 2-4 key punchline words using markdown asterisks **like this**.
+
+RULES FOR THE INSTAGRAM/TIKTOK CAPTION ('generated_caption'):
+Structure the caption in this exact order:
+1. Engaging Hook & detailed backstory / facts explaining the context of what is happening in the video.
+2. Call to Action (CTA) (e.g. 'Would you try this? Let us know below! 👇').
+3. 8-12 targeted viral hashtags.
+4. AT THE VERY END (last line after hashtags): Add the credit line strictly formatted as:
+   Credit: @original_author
+   (If no original creator exists, DO NOT include any credit line at all).
+
+Return strictly a JSON object with this format:
+{
+  "credits": "@original_creator_or_empty",
+  "tweet_text": "First line hook\\n\\nSecond line with **bold words**.",
+  "generated_caption": "Detailed story/backstory...\\n\\nCTA\\n\\n#hashtags\\n\\nCredit: @original_author"
+}
+"""
+
+
 def analyze_with_groq_vision(image_pil, caption_raw=""):
     from groq import Groq
     client = Groq(api_key=GROQ_API_KEY)
 
-    prompt = (
-        "Examine this video frame and the original post description.\n"
-        "1. OCR / Read the header text, tweet, or meme text visible in the image.\n"
-        "2. Identify the original author/account handle (e.g. @username from the avatar/watermark or caption). If none, set 'Unknown'.\n"
-        "3. PARAPHRASE the text into a clean, viral, natural tweet/post text in ENGLISH structured into 1 or 2 distinct short paragraphs separated by a blank line (\\n\\n).\n"
-        "   IMPORTANT: DO NOT USE ANY EMOJIS OR UNICODE SYMBOLS in 'tweet_text'. ONLY STANDARD LETTERS, NUMBERS, AND PUNCTUATION.\n"
-        "   EMPHASIZE 2-4 key punchline words using markdown asterisks **like this**.\n"
-        "4. Generate an EXTENSIVE, engaging, high-quality Instagram/TikTok caption in English. It must include:\n"
-        "   - An intriguing hook\n"
-        "   - Detailed backstory / interesting facts explaining the context of what happens in the video\n"
-        "   - Original source credit line (e.g. 'Source: @author' or 'Credit: @author')\n"
-        "   - Engaging Call to Action (CTA)\n"
-        "   - 8-12 targeted viral hashtags.\n\n"
-        "Return ONLY a JSON object with this exact structure:\n"
-        '{"credits": "@author", "tweet_text": "First line hook\\n\\nSecond line with **bold emphasis**.", "generated_caption": "Detailed long caption with background, credit, CTA, and #hashtags"}'
-    )
-    
+    prompt = AI_PROMPT_INSTRUCTIONS
     if caption_raw:
-        prompt += f"\nOriginal caption: {caption_raw}"
+        prompt += f"\nOriginal post description: {caption_raw}"
 
     content = [{"type": "text", "text": prompt}]
     if image_pil is not None:
@@ -193,7 +207,7 @@ def analyze_with_groq_vision(image_pil, caption_raw=""):
             )
             data = json.loads(completion.choices[0].message.content)
             return (
-                data.get("credits", "Unknown"),
+                data.get("credits", ""),
                 clean_tweet_text(data.get("tweet_text", "")),
                 data.get("generated_caption", "")
             )
@@ -208,27 +222,13 @@ def analyze_with_gemini_vision(image_pil, caption_raw=""):
     from google.genai import types
     
     client = genai.Client(api_key=GEMINI_API_KEY)
-    prompt = """
-    Examine this video frame and caption.
-    1. Read the header text/tweet in the image.
-    2. Identify original creator handle (@user).
-    3. Paraphrase the text into natural English tweet style structured into 1 or 2 short paragraphs (\\n\\n).
-       CRITICAL: DO NOT INCLUDE ANY EMOJIS OR UNICODE SYMBOLS in 'tweet_text'.
-       Highlight 2-4 key punchline words in **bold** using markdown asterisks (**bold words**).
-    4. Generate an EXTENSIVE, engaging Instagram/TikTok caption in English. Include:
-       - Captivating hook
-       - Detailed explanation/facts about what's happening in the video
-       - Explicit credit (e.g. 'Credit: @author')
-       - Call to Action (CTA)
-       - 8-12 relevant viral hashtags.
-    Return JSON: {"credits": "@author", "tweet_text": "...", "generated_caption": "..."}
-    """
+    prompt = AI_PROMPT_INSTRUCTIONS
     
     contents = [prompt]
     if image_pil is not None:
         contents.append(image_pil)
     if caption_raw:
-        contents.append(f"\nOriginal video description: {caption_raw}")
+        contents.append(f"\nOriginal post description: {caption_raw}")
 
     candidate_models = ["gemini-3.6-flash", "gemini-2.0-flash"]
     for model_name in candidate_models:
@@ -241,7 +241,7 @@ def analyze_with_gemini_vision(image_pil, caption_raw=""):
             )
             data = json.loads(res.text)
             return (
-                data.get("credits", "Unknown"),
+                data.get("credits", ""),
                 clean_tweet_text(data.get("tweet_text", "")),
                 data.get("generated_caption", "")
             )
@@ -263,7 +263,7 @@ def analyze_content(image_pil, caption_raw=""):
             return res
 
     print("⚠️ No s'ha pogut utilitzar cap API de Visió. S'utilitzen valors per defecte.")
-    return "Unknown", "Check **this out**!\n\nUnbelievable moment captured on camera.", caption_raw
+    return "", "Check **this out**!\n\nUnbelievable moment captured on camera.", caption_raw
 
 
 # ==========================================
@@ -566,10 +566,10 @@ def send_telegram_notification(video_path, tweet_text, credits, generated_captio
         return
 
     safe_tweet = html.escape(tweet_text or "")
-    safe_credits = html.escape(credits or "Unknown")
+    safe_credits = html.escape(credits or "No especificada")
     safe_video_id = html.escape(video_id or "")
 
-    # 1. Enviar el vídeo amb el resum
+    # 1. Enviar el vídeo amb el resum bàsic
     video_caption = (
         f"🎬 <b>NOU VÍDEO PROCESSAT PER A FEEDITY</b>\n\n"
         f"📌 <b>Tweet Text</b>:\n<i>{safe_tweet}</i>\n\n"
@@ -591,14 +591,14 @@ def send_telegram_notification(video_path, tweet_text, credits, generated_captio
         else:
             print(f"❌ Error en enviar el vídeo a Telegram: {res_video.text}")
 
-    # 2. Enviar el caption d'Instagram extens per separat (sense límit de caràcters)
+    # 2. Enviar el caption d'Instagram extens llest per copiar (amb crèdits al final de tot)
     url_msg = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     caption_text = (
         f"📝 <b>CAPTION PER A PUBLICAR (COPIAR I ENGANXAR)</b>:\n\n"
         f"<code>{html.escape(generated_caption)}</code>"
     )
     data_msg = {
-        "chat_id": TELEGRAM_CHAT_ID,
+        "chat_id": TELEGRAM_CHAT_ID, 
         "text": caption_text,
         "parse_mode": "HTML"
     }
