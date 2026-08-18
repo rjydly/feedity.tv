@@ -2,52 +2,54 @@ name: Feedity Video Pipeline
 
 on:
   schedule:
-    - cron: '0 */6 * * *'  # S'executa cada 6 hores
-  workflow_dispatch:        # Permet execució manual des de la pestanya Actions de GitHub
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
 
 jobs:
   build-and-process:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python 3.10
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg libsm6 libxext6
+          sudo apt-get install -y ffmpeg libsm6 libxext6 fonts-dejavu-core
 
       - name: Install Python Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Install Ollama & Pull Gemma 2 Model
-        run: |
-          curl -fsSL https://ollama.com/install.sh | sh
-          ollama serve &
-          sleep 5
-          ollama pull gemma2
+      - name: Create Cookies File if Secret Exists
+        if: env.INSTAGRAM_COOKIES != ''
+        env:
+          INSTAGRAM_COOKIES: ${{ secrets.INSTAGRAM_COOKIES }}
+        run: echo "$INSTAGRAM_COOKIES" > cookies.txt
 
       - name: Run Main Script
         env:
           PYTHONUNBUFFERED: "1"
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          INSTAGRAM_COOKIES_FILE: ${{ secrets.INSTAGRAM_COOKIES_FILE }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          INSTAGRAM_COOKIES_FILE: "cookies.txt"
         run: python main.py
 
       - name: Commit and Push Processed IDs
         if: always()
         run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
           git add processed_videos.json || true
           git commit -m "Update processed videos history [skip ci]" || true
           git push || true
