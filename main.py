@@ -23,7 +23,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 INSTAGRAM_COOKIES_FILE = os.getenv("INSTAGRAM_COOKIES_FILE")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-TEST_MODE = True  # Mode de proves activat
+TEST_MODE = os.getenv("TEST_MODE", "false").lower() in ("true", "1")
 
 # Rutes de recursos
 ASSETS_DIR = "assets"
@@ -256,7 +256,8 @@ def analyze_with_gemini_vision(image_pil, caption_raw=""):
                 return (
                     data.get("credits", ""),
                     clean_tweet_text(data.get("tweet_text", "")),
-                    format_final_caption(data.get("generated_caption", ""))
+                    format_final_caption(data.get("generated_caption", "")),
+                    data.get("thumbnail_title", "FEATURED STORY").upper()
                 )
         except Exception as e:
             print(f"ℹ️ Gemini error ({model_name}): {e}")
@@ -300,7 +301,8 @@ def analyze_with_groq_vision(image_pil, caption_raw=""):
                 return (
                     data.get("credits", ""),
                     clean_tweet_text(data.get("tweet_text", "")),
-                    format_final_caption(data.get("generated_caption", ""))
+                    format_final_caption(data.get("generated_caption", "")),
+                    data.get("thumbnail_title", "FEATURED STORY").upper()
                 )
         except Exception as e:
             print(f"ℹ️ Groq error ({model_name}): {e}")
@@ -338,12 +340,12 @@ def analyze_content_with_retry(image_pil, caption_raw="", reel_url="", max_retri
 
         if GEMINI_API_KEY:
             res = analyze_with_gemini_vision(image_pil, caption_raw)
-            if res:
+            if res and len(res) == 4:
                 return res
 
         if GROQ_API_KEY:
             res = analyze_with_groq_vision(image_pil, caption_raw)
-            if res:
+            if res and len(res) == 4:
                 return res
 
         if attempt < max_retries:
@@ -872,13 +874,18 @@ def get_reel_by_url(reel_url):
     caption_raw = info.get("description") or ""
 
     frame_image = extract_frame_as_image(downloaded_path, timestamp=0.5)
-    credits, tweet_text, generated_caption, thumbnail_title = analyze_content_with_retry(
+    ai_result = analyze_content_with_retry(
         frame_image, 
         caption_raw=caption_raw, 
         reel_url=reel_url,
         max_retries=5, 
         delay_seconds=60
     )
+
+    if not ai_result or len(ai_result) != 4:
+        return None, None, None, None, None, None
+
+    credits, tweet_text, generated_caption, thumbnail_title = ai_result
 
     if not tweet_text:
         return None, None, None, None, None, None
@@ -911,7 +918,15 @@ def main():
 
     for reel_url in pending_urls:
         print(f"\n🚀 Processant reel pendent: {reel_url}")
-        video_file, video_id, credits, tweet_text, generated_caption, thumbnail_title = get_reel_by_url(reel_url)
+        reel_data = get_reel_by_url(reel_url)
+
+        if not reel_data or len(reel_data) != 6 or not reel_data[0]:
+            print(f"⚠️ Reel omès o fallat: {reel_url}")
+            update_csv_status(reel_url, "failed")
+            print("⏭️ Saltant al següent reel pendent...")
+            continue
+
+        video_file, video_id, credits, tweet_text, generated_caption, thumbnail_title = reel_data
 
         if video_file and tweet_text:
             # 1. Composició de vídeo final
