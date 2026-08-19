@@ -256,8 +256,7 @@ def analyze_with_gemini_vision(image_pil, caption_raw=""):
                 return (
                     data.get("credits", ""),
                     clean_tweet_text(data.get("tweet_text", "")),
-                    format_final_caption(data.get("generated_caption", "")),
-                    data.get("thumbnail_title", "FEATURED STORY").upper()
+                    format_final_caption(data.get("generated_caption", ""))
                 )
         except Exception as e:
             print(f"ℹ️ Gemini error ({model_name}): {e}")
@@ -500,11 +499,11 @@ def create_tweet_header_image(tweet_text, width=1080):
 
 
 # ==========================================
-# MINIATURA PERSONALITZADA (EDITORIAL / BUFFER COVER)
+# MINIATURA PERSONALITZADA (LOGO AMPLIAT / SAFE ZONE 1:1)
 # ==========================================
 
 def create_editorial_thumbnail(video_path, thumbnail_title, output_path="final_thumbnail.jpg"):
-    """Genera una miniatura 1080x1920 amb fons desenfocat, text gran elevat i logo gran a sota."""
+    """Genera la miniatura 1080x1920 amb fons desenfocat, text gran i logo de gran format centrat."""
     frame_pil = extract_frame_as_image(video_path, timestamp=1.0)
     if not frame_pil:
         frame_pil = extract_frame_as_image(video_path, timestamp=0.5)
@@ -522,14 +521,14 @@ def create_editorial_thumbnail(video_path, thumbnail_title, output_path="final_t
     top = (new_h - 1920) // 2
     bg = bg.crop((left, top, left + 1080, top + 1920))
 
-    # 2. Desenfocament gaussià i filtre fosc
-    bg_blurred = bg.filter(ImageFilter.GaussianBlur(radius=30)).convert("RGBA")
-    dark_overlay = Image.new("RGBA", (1080, 1920), (0, 0, 0, 140))  # 55% opacitat
+    # 2. Desenfocament gaussià i filtre de contrast fosc
+    bg_blurred = bg.filter(ImageFilter.GaussianBlur(radius=32)).convert("RGBA")
+    dark_overlay = Image.new("RGBA", (1080, 1920), (0, 0, 0, 150)) # 60% opacitat
     bg_final = Image.alpha_composite(bg_blurred, dark_overlay)
 
     draw = ImageDraw.Draw(bg_final)
 
-    # 3. Tipografia per al titular
+    # 3. Tipografies
     title_font = get_jakarta_font("bold", size=78)
 
     # 4. Ajustar text en línies dins de 920px
@@ -552,31 +551,28 @@ def create_editorial_thumbnail(video_path, thumbnail_title, output_path="final_t
     if current_line:
         lines.append(" ".join(current_line))
 
-    # 5. Càlculs de mides i posicions
+    # 5. Càlcul d'alçades per al centrat vertical exacte a y=960
     line_h = 98
     total_title_h = len(lines) * line_h
-    logo_size = 110  # Mida gran del logo
-    gap = 48         # Espai entre el text i el logo
-    
+    logo_size = 190  # Mida ampliada del logo
+    gap = 48
     total_block_h = total_title_h + gap + logo_size
-    
-    # Centrat vertical a la Safe Zone (y=960) desplaçat lleugerament cap amunt (-45px)
-    start_y = 960 - (total_block_h // 2) - 45
+    start_y = 960 - (total_block_h // 2)
 
-    # 6. Dibuixar Titular (elevat)
+    # Dibuixar el titular en blanc amb ombra
     text_y = start_y
     for line in lines:
         w = draw.textbbox((0, 0), line, font=title_font)[2]
         x = (1080 - w) // 2
-        # Ombra d'alt contrast
+        # Ombra pronunciada
         draw.text((x + 4, text_y + 4), line, font=title_font, fill=(0, 0, 0, 220))
-        # Text principal
+        # Text principal blanc
         draw.text((x, text_y), line, font=title_font, fill=(255, 255, 255))
         text_y += line_h
 
-    # 7. Dibuixar Logo a sota en gran
-    logo_y = text_y + gap
+    # 6. Dibuixar el Logotip Ampliat (190 px) a sota
     logo_x = (1080 - logo_size) // 2
+    logo_y = start_y + total_title_h + gap
 
     logo_file = LOGO_PATH if os.path.exists(LOGO_PATH) else ("logo.png" if os.path.exists("logo.png") else None)
     if logo_file:
@@ -588,13 +584,19 @@ def create_editorial_thumbnail(video_path, thumbnail_title, output_path="final_t
         except Exception as e:
             print(f"⚠️ Error carregant el logo per a la miniatura: {e}")
     else:
-        name_font = get_jakarta_font("semibold", size=48)
-        draw.ellipse([logo_x, logo_y, logo_x + logo_size, logo_y + logo_size], fill=(22, 24, 28))
-        draw.text((logo_x + 32, logo_y + 20), "F", font=name_font, fill=(245, 200, 30))
+        # Fallback dibuixat del cercle groc corporatiu amb la 'f'
+        draw.ellipse([logo_x, logo_y, logo_x + logo_size, logo_y + logo_size], fill=(245, 200, 30))
+        f_font = get_jakarta_font("bold", size=int(logo_size * 0.65))
+        f_bbox = draw.textbbox((0, 0), "f", font=f_font)
+        f_w = f_bbox[2] - f_bbox[0]
+        f_h = f_bbox[3] - f_bbox[1]
+        f_x = logo_x + (logo_size - f_w) // 2 - f_bbox[0]
+        f_y = logo_y + (logo_size - f_h) // 2 - f_bbox[1]
+        draw.text((f_x, f_y), "f", font=f_font, fill=(255, 255, 255))
 
-    # Guardar en format JPG
+    # Guardar com a JPEG d'alta qualitat
     bg_final.convert("RGB").save(output_path, "JPEG", quality=95)
-    print(f"🖼️ Miniatura editorial generada amb èxit a: {output_path}")
+    print(f"🖼️ Miniatura generada amb èxit a: {output_path}")
     return output_path
 
 
@@ -783,10 +785,10 @@ def send_telegram_notification(video_path, thumbnail_path, tweet_text, credits, 
     if thumbnail_path and os.path.exists(thumbnail_path):
         url_photo = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
         with open(thumbnail_path, "rb") as photo_file:
-            photo_caption = f"🖼️ <b>MINIATURA PER A LA GRAELLA (BUFFER COVER)</b>\nTitular i logo centrats a la Safe Zone (1:1)."
+            photo_caption = f"🖼️ <b>MINIATURA PER A LA GRAELLA (BUFFER COVER)</b>\nTitular i logotip ampliats a la Safe Zone (1:1)."
             files = {"photo": photo_file}
             data = {
-                "chat_id": TELEGRAM_CHAT_ID,
+                "chat_id": TELEGRAM_CHAT_ID, 
                 "caption": photo_caption,
                 "parse_mode": "HTML"
             }
@@ -796,7 +798,7 @@ def send_telegram_notification(video_path, thumbnail_path, tweet_text, credits, 
             else:
                 print(f"⚠️ Error en enviar la miniatura: {res_photo.text}")
 
-    # 3. Enviar el caption llest per copiar
+    # 3. Enviar el caption extens llest per copiar
     url_msg = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     caption_text = (
         f"📝 <b>CAPTION PER A PUBLICAR (COPIAR I ENGANXAR)</b>:\n\n"
@@ -889,6 +891,7 @@ def main():
         print("❌ No s'ha trobat el fitxer sources.csv")
         return
 
+    # Llegir la llista d'enllaços pendents
     pending_urls = []
     with open("sources.csv", mode="r", newline="", encoding="utf-8") as f:
         reader = csv.reader(f)
