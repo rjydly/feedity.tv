@@ -10,7 +10,7 @@ from io import BytesIO
 import requests
 import numpy as np
 import cv2
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 import yt_dlp
 from moviepy import VideoFileClip, CompositeVideoClip, ImageClip
 
@@ -23,7 +23,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 INSTAGRAM_COOKIES_FILE = os.getenv("INSTAGRAM_COOKIES_FILE")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-TEST_MODE = os.getenv("TEST_MODE", "false").lower() in ("true", "1")
+TEST_MODE = True  # Mode de proves activat
 
 # Rutes de recursos
 ASSETS_DIR = "assets"
@@ -61,7 +61,7 @@ def save_processed_id(video_id):
 
 def update_csv_status(target_url, new_status="done"):
     """Actualitza la columna status a sources.csv."""
-    if not os.path.exists("sources.csv"):
+    if not os.path.exists("sources.csv") or TEST_MODE:
         return
 
     rows = []
@@ -186,6 +186,10 @@ RULES FOR TWEET TEXT:
 - STRICTLY NO EMOJIS OR UNICODE SYMBOLS in 'tweet_text'.
 - EMPHASIZE 2-4 key punchline words using markdown asterisks **like this**.
 
+RULES FOR THUMBNAIL TITLE ('thumbnail_title'):
+- Create an ultra-punchy, high-impact headline of 3 TO 6 WORDS in UPPERCASE ENGLISH for the Instagram cover.
+- Example: "MARS NIGHT SKY REVEALED" or "THE SECRET MARS VIEW".
+
 RULES FOR THE INSTAGRAM/TIKTOK CAPTION ('generated_caption'):
 Structure the caption in this exact order:
 1. Engaging Hook & detailed backstory / facts explaining the context of what is happening in the video.
@@ -200,6 +204,7 @@ Return strictly a JSON object with this format:
 {{
   "credits": "@original_creator_or_empty",
   "tweet_text": "First line hook\\n\\nSecond line with **bold words**.",
+  "thumbnail_title": "MARS NIGHT SKY REVEALED",
   "generated_caption": "Detailed story/backstory...\\n\\nCTA\\n\\n#hashtags\\n\\nCredit: @original_author\\n\\n{DISCLAIMER_TEXT}"
 }}
 """
@@ -237,7 +242,6 @@ def analyze_with_gemini_vision(image_pil, caption_raw=""):
     if caption_raw:
         contents.append(f"\nOriginal post description: {caption_raw}")
 
-    # Models actuals suportats per Gemini
     candidate_models = ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-2.0-flash"]
     for model_name in candidate_models:
         try:
@@ -252,7 +256,8 @@ def analyze_with_gemini_vision(image_pil, caption_raw=""):
                 return (
                     data.get("credits", ""),
                     clean_tweet_text(data.get("tweet_text", "")),
-                    format_final_caption(data.get("generated_caption", ""))
+                    format_final_caption(data.get("generated_caption", "")),
+                    data.get("thumbnail_title", "FEATURED STORY").upper()
                 )
         except Exception as e:
             print(f"ℹ️ Gemini error ({model_name}): {e}")
@@ -277,7 +282,6 @@ def analyze_with_groq_vision(image_pil, caption_raw=""):
             "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
         })
 
-    # Models de visió actius a Groq
     candidate_models = [
         "qwen/qwen3.6-27b",
         "meta-llama/llama-4-scout-17b-16e-instruct"
@@ -297,7 +301,8 @@ def analyze_with_groq_vision(image_pil, caption_raw=""):
                 return (
                     data.get("credits", ""),
                     clean_tweet_text(data.get("tweet_text", "")),
-                    format_final_caption(data.get("generated_caption", ""))
+                    format_final_caption(data.get("generated_caption", "")),
+                    data.get("thumbnail_title", "FEATURED STORY").upper()
                 )
         except Exception as e:
             print(f"ℹ️ Groq error ({model_name}): {e}")
@@ -349,7 +354,7 @@ def analyze_content_with_retry(image_pil, caption_raw="", reel_url="", max_retri
 
     print(f"❌ La IA no ha respost després de {max_retries} intents.")
     send_telegram_alert("Totes les APIs de visió (Gemini i Groq) han fallat.", reel_url)
-    return None, None, None
+    return None, None, None, None
 
 
 # ==========================================
@@ -493,6 +498,99 @@ def create_tweet_header_image(tweet_text, width=1080):
         text_y += line_height
 
     return np.array(img)
+
+
+# ==========================================
+# MINIATURA PERSONALITZADA (EDITÒRIAL / BUFFER COVER)
+# ==========================================
+
+def create_editorial_thumbnail(video_path, thumbnail_title, output_path="final_thumbnail.jpg"):
+    """Genera una miniatura 1080x1920 amb fons desenfocat i text gran a la Safe Zone 1:1."""
+    frame_pil = extract_frame_as_image(video_path, timestamp=1.0)
+    if not frame_pil:
+        frame_pil = extract_frame_as_image(video_path, timestamp=0.5)
+
+    if not frame_pil:
+        frame_pil = Image.new("RGB", (1080, 1920), (15, 15, 15))
+
+    # 1. Escalar i retallar el fotograma per omplir 1080x1920 (Aspect Fill)
+    w_img, h_img = frame_pil.size
+    scale = max(1080 / w_img, 1920 / h_img)
+    new_w, new_h = int(w_img * scale), int(h_img * scale)
+    bg = frame_pil.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    
+    left = (new_w - 1080) // 2
+    top = (new_h - 1920) // 2
+    bg = bg.crop((left, top, left + 1080, top + 1920))
+
+    # 2. Desenfocament gaussià intens i filtre de contrast fosc
+    bg_blurred = bg.filter(ImageFilter.GaussianBlur(radius=30)).convert("RGBA")
+    dark_overlay = Image.new("RGBA", (1080, 1920), (0, 0, 0, 150)) # 60% opacitat
+    bg_final = Image.alpha_composite(bg_blurred, dark_overlay)
+
+    draw = ImageDraw.Draw(bg_final)
+
+    # 3. Tipografies per a la miniatura
+    tag_font = get_jakarta_font("bold", size=32)
+    title_font = get_jakarta_font("bold", size=76)
+
+    # 4. Ajustar text en línies dins de 900px
+    words = thumbnail_title.split()
+    lines = []
+    current_line = []
+    
+    for word in words:
+        test_line = " ".join(current_line + [word])
+        w = draw.textbbox((0, 0), test_line, font=title_font)[2]
+        if w <= 900:
+            current_line.append(word)
+        else:
+            if current_line:
+                lines.append(" ".join(current_line))
+                current_line = [word]
+            else:
+                lines.append(word)
+                current_line = []
+    if current_line:
+        lines.append(" ".join(current_line))
+
+    # 5. Càlcul de posició vertical (Centre exacte de la Safe Zone 1:1: y=960)
+    line_h = 95
+    total_title_h = len(lines) * line_h
+    badge_h = 44
+    gap = 28
+    total_block_h = badge_h + gap + total_title_h
+    start_y = 960 - (total_block_h // 2)
+
+    # Badge de Feedity
+    badge_text = "FEEDITY EXCLUSIVE"
+    badge_bbox = draw.textbbox((0, 0), badge_text, font=tag_font)
+    badge_w = badge_bbox[2] - badge_bbox[0] + 36
+    badge_x = (1080 - badge_w) // 2
+    badge_y = start_y
+
+    draw.rounded_rectangle(
+        [badge_x, badge_y, badge_x + badge_w, badge_y + badge_h],
+        radius=8,
+        fill=(245, 200, 30) # Groc corporatiu
+    )
+    draw.text((badge_x + 18, badge_y + 6), badge_text, font=tag_font, fill=(0, 0, 0))
+
+    # Titular gran en blanc amb ombra
+    text_y = badge_y + badge_h + gap
+    for line in lines:
+        w = draw.textbbox((0, 0), line, font=title_font)[2]
+        x = (1080 - w) // 2
+        # Ombra
+        draw.text((x + 3, text_y + 3), line, font=title_font, fill=(0, 0, 0, 200))
+        # Text principal
+        draw.text((x, text_y), line, font=title_font, fill=(255, 255, 255))
+        text_y += line_h
+
+    # Guardar en format JPG
+    bg_final.convert("RGB").save(output_path, "JPEG", quality=95)
+    print(f"🖼️ Miniatura editorial generada amb èxit a: {output_path}")
+    return output_path
 
 
 # ==========================================
@@ -645,7 +743,7 @@ def process_video_canvas(input_path, tweet_text, output_path="final_feedity.mp4"
 # NOTIFICACIÓ TELEGRAM
 # ==========================================
 
-def send_telegram_notification(video_path, tweet_text, credits, generated_caption, video_id):
+def send_telegram_notification(video_path, thumbnail_path, tweet_text, credits, generated_caption, video_id):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("⚠️ Notificació de Telegram omessa (tokens no configurats).")
         return
@@ -654,6 +752,7 @@ def send_telegram_notification(video_path, tweet_text, credits, generated_captio
     safe_credits = html.escape(credits or "No especificada")
     safe_video_id = html.escape(video_id or "")
 
+    # 1. Enviar el vídeo
     video_caption = (
         f"🎬 <b>NOU VÍDEO PROCESSAT PER A FEEDITY</b>\n\n"
         f"📌 <b>Tweet Text</b>:\n<i>{safe_tweet}</i>\n\n"
@@ -675,6 +774,24 @@ def send_telegram_notification(video_path, tweet_text, credits, generated_captio
         else:
             print(f"❌ Error en enviar el vídeo a Telegram: {res_video.text}")
 
+    # 2. Enviar la miniatura personalitzada
+    if thumbnail_path and os.path.exists(thumbnail_path):
+        url_photo = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+        with open(thumbnail_path, "rb") as photo_file:
+            photo_caption = f"🖼️ <b>MINIATURA PER A LA GRAELLA (BUFFER COVER)</b>\nTitular centrat a la Safe Zone (1:1)."
+            files = {"photo": photo_file}
+            data = {
+                "chat_id": TELEGRAM_CHAT_ID,
+                "caption": photo_caption,
+                "parse_mode": "HTML"
+            }
+            res_photo = requests.post(url_photo, data=data, files=files)
+            if res_photo.status_code == 200:
+                print("🖼️ Miniatura enviada correctament a Telegram!")
+            else:
+                print(f"⚠️ Error en enviar la miniatura: {res_photo.text}")
+
+    # 3. Enviar el caption llest per copiar
     url_msg = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     caption_text = (
         f"📝 <b>CAPTION PER A PUBLICAR (COPIAR I ENGANXAR)</b>:\n\n"
@@ -730,10 +847,10 @@ def get_reel_by_url(reel_url):
             info = ydl.extract_info(reel_url, download=True)
     except yt_dlp.utils.DownloadError as e:
         print(f"❌ Error en descarregar el reel amb yt-dlp: {e}")
-        return None, None, None, None, None
+        return None, None, None, None, None, None
     except Exception as e:
         print(f"❌ Error inesperat amb yt-dlp: {e}")
-        return None, None, None, None, None
+        return None, None, None, None, None, None
 
     video_id = str(info.get("id") or shortcode or reel_url)
     downloaded_path = ydl.prepare_filename(info)
@@ -743,12 +860,12 @@ def get_reel_by_url(reel_url):
 
     if not downloaded_path or not os.path.exists(downloaded_path):
         print("⚠️ yt-dlp no ha generat cap fitxer de vídeo.")
-        return None, None, None, None, None
+        return None, None, None, None, None, None
 
     caption_raw = info.get("description") or ""
 
     frame_image = extract_frame_as_image(downloaded_path, timestamp=0.5)
-    credits, tweet_text, generated_caption = analyze_content_with_retry(
+    credits, tweet_text, generated_caption, thumbnail_title = analyze_content_with_retry(
         frame_image, 
         caption_raw=caption_raw, 
         reel_url=reel_url,
@@ -757,9 +874,9 @@ def get_reel_by_url(reel_url):
     )
 
     if not tweet_text:
-        return None, None, None, None, None
+        return None, None, None, None, None, None
 
-    return downloaded_path, video_id, credits, tweet_text, generated_caption
+    return downloaded_path, video_id, credits, tweet_text, generated_caption, thumbnail_title
 
 
 def main():
@@ -771,15 +888,14 @@ def main():
     pending_urls = []
     with open("sources.csv", mode="r", newline="", encoding="utf-8") as f:
         reader = csv.reader(f)
-        header = next(reader, None)  # Salta la capçalera
+        header = next(reader, None)
         for row in reader:
             if not row or len(row) < 1:
                 continue
             url = row[0].strip()
-            # Si no té columna d'estat o és 'pending', es posa a la cua
             status = row[1].strip().lower() if len(row) > 1 else "pending"
             
-            if status == "pending" and url.startswith("http"):
+            if (status == "pending" or TEST_MODE) and url.startswith("http"):
                 pending_urls.append(url)
 
     if not pending_urls:
@@ -788,14 +904,28 @@ def main():
 
     for reel_url in pending_urls:
         print(f"\n🚀 Processant reel pendent: {reel_url}")
-        video_file, video_id, credits, tweet_text, generated_caption = get_reel_by_url(reel_url)
+        video_file, video_id, credits, tweet_text, generated_caption, thumbnail_title = get_reel_by_url(reel_url)
 
         if video_file and tweet_text:
+            # 1. Composició de vídeo final
             process_video_canvas(video_file, tweet_text, "final_feedity.mp4")
-            send_telegram_notification("final_feedity.mp4", tweet_text, credits, generated_caption, video_id)
+
+            # 2. Generació de miniatura editorial
+            thumbnail_file = create_editorial_thumbnail(video_file, thumbnail_title, "final_thumbnail.jpg")
+
+            # 3. Notificació triple a Telegram (Vídeo + Miniatura + Caption)
+            send_telegram_notification(
+                "final_feedity.mp4", 
+                thumbnail_file, 
+                tweet_text, 
+                credits, 
+                generated_caption, 
+                video_id
+            )
+
             save_processed_id(video_id)
             update_csv_status(reel_url, "done")
-            print("✅ Procés finalitzat amb èxit i marcat com a 'done'!")
+            print("✅ Procés finalitzat amb èxit!")
             break
         else:
             print(f"⚠️ Reel omès o fallat: {reel_url}")
