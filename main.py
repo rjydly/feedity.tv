@@ -14,13 +14,16 @@ from PIL import Image, ImageDraw, ImageFont
 import yt_dlp
 from moviepy import VideoFileClip, CompositeVideoClip, ImageClip
 
-# Configuració
+# ==========================================
+# CONFIGURACIÓ I CONSTANTS
+# ==========================================
+
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 INSTAGRAM_COOKIES_FILE = os.getenv("INSTAGRAM_COOKIES_FILE")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-TEST_MODE = os.getenv("TEST_MODE", "true").lower() in ("true", "1")
+TEST_MODE = os.getenv("TEST_MODE", "false").lower() in ("true", "1")
 
 # Rutes de recursos
 ASSETS_DIR = "assets"
@@ -234,7 +237,8 @@ def analyze_with_gemini_vision(image_pil, caption_raw=""):
     if caption_raw:
         contents.append(f"\nOriginal post description: {caption_raw}")
 
-    candidate_models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+    # Models actuals suportats per Gemini
+    candidate_models = ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-2.0-flash"]
     for model_name in candidate_models:
         try:
             print(f"🧠 [Gemini] Provant model {model_name}...")
@@ -273,9 +277,10 @@ def analyze_with_groq_vision(image_pil, caption_raw=""):
             "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
         })
 
+    # Models de visió actius a Groq
     candidate_models = [
-        "llama-3.2-11b-vision-preview",
-        "llama-3.2-90b-vision-preview"
+        "qwen/qwen3.6-27b",
+        "meta-llama/llama-4-scout-17b-16e-instruct"
     ]
 
     for model_name in candidate_models:
@@ -794,6 +799,8 @@ def main():
             break
         else:
             print(f"⚠️ Reel omès o fallat: {reel_url}")
+            update_csv_status(reel_url, "failed")
+            print("⏭️ Saltant al següent reel pendent...")
 
 
 if __name__ == "__main__":
