@@ -12,18 +12,21 @@ import numpy as np
 import cv2
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 import yt_dlp
-from moviepy import VideoFileClip, CompositeVideoClip, ImageClip
+from moviepy import VideoFileClip, CompositeVideoClip, ImageClip, concatenate_videoclips
 
 # ==========================================
-# CONFIGURACIÓ I CONSTANTS
+# CONFIGURACIÓ PRINCIPAL
 # ==========================================
 
+# Canvia manualment aquí entre True (proves) i False (producció)
+TEST_MODE = True
+
+# Secrets i credencials
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 INSTAGRAM_COOKIES_FILE = os.getenv("INSTAGRAM_COOKIES_FILE")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-TEST_MODE = os.getenv("TEST_MODE", "false").lower() in ("true", "1")
 
 # Rutes de recursos
 ASSETS_DIR = "assets"
@@ -513,7 +516,7 @@ def create_editorial_thumbnail(video_path, thumbnail_title, output_path="final_t
     if not frame_pil:
         frame_pil = Image.new("RGB", (1080, 1920), (15, 15, 15))
 
-    # 1. Escalar i retallar el fotograma per omplir 1080x1920 (Aspect Fill)
+    # 1. Escalar i retallar el fotograma per omplir 1080x1920
     w_img, h_img = frame_pil.size
     scale = max(1080 / w_img, 1920 / h_img)
     new_w, new_h = int(w_img * scale), int(h_img * scale)
@@ -525,12 +528,12 @@ def create_editorial_thumbnail(video_path, thumbnail_title, output_path="final_t
 
     # 2. Desenfocament gaussià i filtre de contrast fosc
     bg_blurred = bg.filter(ImageFilter.GaussianBlur(radius=32)).convert("RGBA")
-    dark_overlay = Image.new("RGBA", (1080, 1920), (0, 0, 0, 150)) # 60% opacitat
+    dark_overlay = Image.new("RGBA", (1080, 1920), (0, 0, 0, 150))
     bg_final = Image.alpha_composite(bg_blurred, dark_overlay)
 
     draw = ImageDraw.Draw(bg_final)
 
-    # 3. Tipografies
+    # 3. Tipografia del titular
     title_font = get_jakarta_font("bold", size=78)
 
     # 4. Ajustar text en línies dins de 920px
@@ -553,10 +556,10 @@ def create_editorial_thumbnail(video_path, thumbnail_title, output_path="final_t
     if current_line:
         lines.append(" ".join(current_line))
 
-    # 5. Càlcul d'alçades per al centrat vertical exacte a y=960
+    # 5. Càlcul d'alçades per al centrat vertical exacte a y=960 (Safe Zone 1:1)
     line_h = 98
     total_title_h = len(lines) * line_h
-    logo_size = 190  # Mida ampliada del logo
+    logo_size = 190
     gap = 48
     total_block_h = total_title_h + gap + logo_size
     start_y = 960 - (total_block_h // 2)
@@ -566,9 +569,7 @@ def create_editorial_thumbnail(video_path, thumbnail_title, output_path="final_t
     for line in lines:
         w = draw.textbbox((0, 0), line, font=title_font)[2]
         x = (1080 - w) // 2
-        # Ombra pronunciada
         draw.text((x + 4, text_y + 4), line, font=title_font, fill=(0, 0, 0, 220))
-        # Text principal blanc
         draw.text((x, text_y), line, font=title_font, fill=(255, 255, 255))
         text_y += line_h
 
@@ -586,7 +587,6 @@ def create_editorial_thumbnail(video_path, thumbnail_title, output_path="final_t
         except Exception as e:
             print(f"⚠️ Error carregant el logo per a la miniatura: {e}")
     else:
-        # Fallback dibuixat del cercle groc corporatiu amb la 'f'
         draw.ellipse([logo_x, logo_y, logo_x + logo_size, logo_y + logo_size], fill=(245, 200, 30))
         f_font = get_jakarta_font("bold", size=int(logo_size * 0.65))
         f_bbox = draw.textbbox((0, 0), "f", font=f_font)
@@ -596,10 +596,10 @@ def create_editorial_thumbnail(video_path, thumbnail_title, output_path="final_t
         f_y = logo_y + (logo_size - f_h) // 2 - f_bbox[1]
         draw.text((f_x, f_y), "f", font=f_font, fill=(255, 255, 255))
 
-    # Guardar com a JPEG d'alta qualitat
-    bg_final.convert("RGB").save(output_path, "JPEG", quality=95)
+    bg_rgb = bg_final.convert("RGB")
+    bg_rgb.save(output_path, "JPEG", quality=95)
     print(f"🖼️ Miniatura generada amb èxit a: {output_path}")
-    return output_path
+    return np.array(bg_rgb), output_path
 
 
 # ==========================================
@@ -697,10 +697,10 @@ def crop_content_bounding_box(clip, num_samples=6):
 
 
 # ==========================================
-# RENDERITZAT FINAL AMB FORMAT TWEET
+# RENDERITZAT FINAL (AMB FRAME 0 PORTADA)
 # ==========================================
 
-def process_video_canvas(input_path, tweet_text, output_path="final_feedity.mp4"):
+def process_video_canvas(input_path, tweet_text, thumbnail_img_np, output_path="final_feedity.mp4"):
     clip = VideoFileClip(input_path)
     frame_w, frame_h = clip.w, clip.h
     bbox = crop_content_bounding_box(clip)
@@ -732,9 +732,14 @@ def process_video_canvas(input_path, tweet_text, output_path="final_feedity.mp4"
     video_y_pos = 180 + header_h + 10
     video_positioned = scaled_clip.with_position(("center", video_y_pos))
 
-    final_clip = CompositeVideoClip([video_positioned, header_clip], size=(1080, 1920))
+    # Vídeo principal compost
+    main_video_composite = CompositeVideoClip([video_positioned, header_clip], size=(1080, 1920))
 
-    final_clip.write_videofile(
+    # Incrustar la miniatura com a primer fotograma (1 frame = 1/30 segons)
+    cover_clip = ImageClip(thumbnail_img_np).with_duration(1.0 / 30.0)
+    final_video = concatenate_videoclips([cover_clip, main_video_composite])
+
+    final_video.write_videofile(
         output_path, 
         codec="libx264", 
         audio_codec="aac",
@@ -744,7 +749,9 @@ def process_video_canvas(input_path, tweet_text, output_path="final_feedity.mp4"
 
     clip.close()
     cropped_clip.close()
-    final_clip.close()
+    main_video_composite.close()
+    cover_clip.close()
+    final_video.close()
     header_clip.close()
 
 
@@ -761,61 +768,44 @@ def send_telegram_notification(video_path, thumbnail_path, tweet_text, credits, 
     safe_credits = html.escape(credits or "No especificada")
     safe_video_id = html.escape(video_id or "")
 
-    # 1. Enviar el vídeo
-    video_caption = (
-        f"🎬 <b>NOU VÍDEO PROCESSAT PER A FEEDITY</b>\n\n"
-        f"📌 <b>Tweet Text</b>:\n<i>{safe_tweet}</i>\n\n"
-        f"👤 <b>Font Original</b>: {safe_credits}\n"
-        f"🆔 <b>ID</b>: <code>{safe_video_id}</code>"
-    )
+    # SI ESTEM EN MODE DE PROVES: enviem el vídeo, la miniatura i el caption complet
+    if TEST_MODE:
+        print("🧪 [Mode Proves] Enviant vídeo, miniatura i caption per a revisió...")
+        
+        # 1. Vídeo
+        video_caption = (
+            f"🎬 <b>[TEST MODE] NOU VÍDEO PROCESSAT</b>\n\n"
+            f"📌 <b>Tweet Text</b>:\n<i>{safe_tweet}</i>\n\n"
+            f"👤 <b>Font Original</b>: {safe_credits}\n"
+            f"🆔 <b>ID</b>: <code>{safe_video_id}</code>"
+        )
+        url_video = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
+        with open(video_path, "rb") as video_file:
+            requests.post(url_video, data={"chat_id": TELEGRAM_CHAT_ID, "caption": video_caption, "parse_mode": "HTML"}, files={"video": video_file})
 
-    url_video = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
-    with open(video_path, "rb") as video_file:
-        files = {"video": video_file}
-        data = {
-            "chat_id": TELEGRAM_CHAT_ID, 
-            "caption": video_caption,
-            "parse_mode": "HTML"
-        }
-        res_video = requests.post(url_video, data=data, files=files)
-        if res_video.status_code == 200:
-            print("🚀 Vídeo enviat correctament a Telegram!")
-        else:
-            print(f"❌ Error en enviar el vídeo a Telegram: {res_video.text}")
+        # 2. Miniatura
+        if thumbnail_path and os.path.exists(thumbnail_path):
+            url_photo = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+            with open(thumbnail_path, "rb") as photo_file:
+                requests.post(url_photo, data={"chat_id": TELEGRAM_CHAT_ID, "caption": "🖼️ <b>[TEST MODE] Portada generada</b>", "parse_mode": "HTML"}, files={"photo": photo_file})
 
-    # 2. Enviar la miniatura personalitzada
-    if thumbnail_path and os.path.exists(thumbnail_path):
-        url_photo = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-        with open(thumbnail_path, "rb") as photo_file:
-            photo_caption = f"🖼️ <b>MINIATURA PER A LA GRAELLA (BUFFER COVER)</b>\nTitular i logotip ampliats a la Safe Zone (1:1)."
-            files = {"photo": photo_file}
-            data = {
-                "chat_id": TELEGRAM_CHAT_ID, 
-                "caption": photo_caption,
-                "parse_mode": "HTML"
-            }
-            res_photo = requests.post(url_photo, data=data, files=files)
-            if res_photo.status_code == 200:
-                print("🖼️ Miniatura enviada correctament a Telegram!")
-            else:
-                print(f"⚠️ Error en enviar la miniatura: {res_photo.text}")
+        # 3. Caption llest per copiar
+        url_msg = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        caption_text = f"📝 <b>[TEST MODE] CAPTION PER A PUBLICAR</b>:\n\n<code>{html.escape(generated_caption)}</code>"
+        requests.post(url_msg, data={"chat_id": TELEGRAM_CHAT_ID, "text": caption_text, "parse_mode": "HTML"})
 
-    # 3. Enviar el caption extens llest per copiar
-    url_msg = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    caption_text = (
-        f"📝 <b>CAPTION PER A PUBLICAR (COPIAR I ENGANXAR)</b>:\n\n"
-        f"<code>{html.escape(generated_caption)}</code>"
-    )
-    data_msg = {
-        "chat_id": TELEGRAM_CHAT_ID, 
-        "text": caption_text,
-        "parse_mode": "HTML"
-    }
-    res_msg = requests.post(url_msg, data=data_msg)
-    if res_msg.status_code == 200:
-        print("📋 Caption extens enviat correctament!")
+    # SI ESTEM EN PRODUCCIÓ (TEST_MODE = False): només enviem una confirmació de text curt
     else:
-        print(f"⚠️ Error en enviar el caption: {res_msg.text}")
+        print("🚀 [Producció] Enviant només resum de confirmació...")
+        url_msg = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        confirm_text = (
+            f"✅ <b>VÍDEO PUBLICAT AMB ÈXIT</b>\n\n"
+            f"📌 <b>Tweet:</b> {safe_tweet}\n"
+            f"👤 <b>Font:</b> {safe_credits}\n"
+            f"🆔 <b>ID:</b> <code>{safe_video_id}</code>\n"
+            f"🌐 <i>Estat a sources.csv: <b>done</b></i>"
+        )
+        requests.post(url_msg, data={"chat_id": TELEGRAM_CHAT_ID, "text": confirm_text, "parse_mode": "HTML"})
 
 
 # ==========================================
@@ -929,13 +919,13 @@ def main():
         video_file, video_id, credits, tweet_text, generated_caption, thumbnail_title = reel_data
 
         if video_file and tweet_text:
-            # 1. Composició de vídeo final
-            process_video_canvas(video_file, tweet_text, "final_feedity.mp4")
+            # 1. Generar la miniatura editorial
+            thumbnail_np, thumbnail_file = create_editorial_thumbnail(video_file, thumbnail_title, "final_thumbnail.jpg")
 
-            # 2. Generació de miniatura editorial
-            thumbnail_file = create_editorial_thumbnail(video_file, thumbnail_title, "final_thumbnail.jpg")
+            # 2. Composició de vídeo final (amb el frame 0 de la portada)
+            process_video_canvas(video_file, tweet_text, thumbnail_np, "final_feedity.mp4")
 
-            # 3. Notificació triple a Telegram (Vídeo + Miniatura + Caption)
+            # 3. Notificació a Telegram segons mode
             send_telegram_notification(
                 "final_feedity.mp4", 
                 thumbnail_file, 
