@@ -20,7 +20,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 INSTAGRAM_COOKIES_FILE = os.getenv("INSTAGRAM_COOKIES_FILE")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-TEST_MODE = os.getenv("TEST_MODE", "false").lower() in ("true", "1")
+TEST_MODE = os.getenv("TEST_MODE", "true").lower() in ("true", "1")
 
 # Rutes de recursos
 ASSETS_DIR = "assets"
