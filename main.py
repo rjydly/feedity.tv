@@ -1,5 +1,6 @@
 import os
 import re
+import csv
 import json
 import glob
 import html
@@ -19,7 +20,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 INSTAGRAM_COOKIES_FILE = os.getenv("INSTAGRAM_COOKIES_FILE")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-TEST_MODE = True  # Mode de proves activat
+TEST_MODE = os.getenv("TEST_MODE", "false").lower() in ("true", "1")
 
 # Rutes de recursos
 ASSETS_DIR = "assets"
@@ -31,7 +32,7 @@ DISCLAIMER_TEXT = "All rights belong to the respective owner. DM for credit or r
 
 
 # ==========================================
-# GESTIÓ D'HISTORIAL
+# GESTIÓ D'HISTORIAL I CSV
 # ==========================================
 
 def load_processed_ids():
@@ -53,6 +54,28 @@ def save_processed_id(video_id):
         history.append(video_id)
         with open("processed_videos.json", "w") as f:
             json.dump(history, f, indent=4)
+
+
+def update_csv_status(target_url, new_status="done"):
+    """Actualitza la columna status a sources.csv."""
+    if not os.path.exists("sources.csv"):
+        return
+
+    rows = []
+    with open("sources.csv", mode="r", newline="", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        for row in reader:
+            if not row:
+                continue
+            if row[0].strip() == target_url.strip():
+                rows.append([row[0].strip(), new_status])
+            else:
+                rows.append(row)
+
+    with open("sources.csv", mode="w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerows(rows)
+    print(f"📝 sources.csv actualitzat: {target_url} -> {new_status}")
 
 
 # ==========================================
@@ -211,7 +234,7 @@ def analyze_with_gemini_vision(image_pil, caption_raw=""):
     if caption_raw:
         contents.append(f"\nOriginal post description: {caption_raw}")
 
-    candidate_models = ["gemini-3.6-flash", "gemini-2.0-flash", "gemini-2.5-flash"]
+    candidate_models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
     for model_name in candidate_models:
         try:
             print(f"🧠 [Gemini] Provant model {model_name}...")
@@ -251,8 +274,8 @@ def analyze_with_groq_vision(image_pil, caption_raw=""):
         })
 
     candidate_models = [
-        "qwen/qwen3.6-27b",
-        "meta-llama/llama-4-scout-17b-16e-instruct"
+        "llama-3.2-11b-vision-preview",
+        "llama-3.2-90b-vision-preview"
     ]
 
     for model_name in candidate_models:
@@ -284,7 +307,7 @@ def send_telegram_alert(error_detail, reel_url=""):
     url_msg = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     alert_text = (
         f"🚨 <b>ALERTA CRÍTICA FEEDITY PIPELINE</b> 🚨\n\n"
-        f"❌ <b>Error:</b> Cap servei d'Intel·ligència Artificial (Gemini / Groq) ha respost després de <b>5 intents</b> (esperant 1 minut entre cadascun).\n\n"
+        f"❌ <b>Error:</b> Cap servei d'Intel·ligència Artificial (Gemini / Groq) ha respost després de <b>5 intents</b>.\n\n"
         f"🔗 <b>Reel afectat:</b> {html.escape(reel_url)}\n\n"
         f"⚠️ <i>El processament s'ha aturat per evitar publicar un vídeo buit o erroni.</i>\n\n"
         f"📋 <b>Detalls de l'error:</b>\n<code>{html.escape(str(error_detail)[:350])}</code>"
@@ -302,31 +325,25 @@ def send_telegram_alert(error_detail, reel_url=""):
 
 
 def analyze_content_with_retry(image_pil, caption_raw="", reel_url="", max_retries=5, delay_seconds=60):
-    """
-    Executa primer Gemini per defecte. Si falla o està saturat, prova Groq.
-    Si ambdues fallen, espera 60 segons i reintenta fins a 5 vegades.
-    """
     for attempt in range(1, max_retries + 1):
         print(f"\n🤖 [Intent {attempt}/{max_retries}] Analitzant contingut visual i text amb IA...")
 
-        # 1. Prioritat absoluta: Google Gemini
         if GEMINI_API_KEY:
             res = analyze_with_gemini_vision(image_pil, caption_raw)
             if res:
                 return res
 
-        # 2. Pla B: Groq Vision
         if GROQ_API_KEY:
             res = analyze_with_groq_vision(image_pil, caption_raw)
             if res:
                 return res
 
         if attempt < max_retries:
-            print(f"⏳ Totes les APIs han fallat o estan saturades (503). Esperant {delay_seconds} segons abans del següent intent...")
+            print(f"⏳ Totes les APIs han fallat o estan saturades. Esperant {delay_seconds} segons...")
             time.sleep(delay_seconds)
 
     print(f"❌ La IA no ha respost després de {max_retries} intents.")
-    send_telegram_alert("Totes les APIs de visió (Gemini i Groq) han fallat per saturació persistent.", reel_url)
+    send_telegram_alert("Totes les APIs de visió (Gemini i Groq) han fallat.", reel_url)
     return None, None, None
 
 
@@ -402,7 +419,6 @@ def create_tweet_header_image(tweet_text, width=1080):
     margin_x = 75
     max_text_width = width - (margin_x * 2)
 
-    # Tipografies Plus Jakarta Sans ampliades
     name_font = get_jakarta_font("semibold", size=48)
     handle_font = get_jakarta_font("regular", size=38)
     body_font_regular = get_jakarta_font("regular", size=44)
@@ -424,7 +440,6 @@ def create_tweet_header_image(tweet_text, width=1080):
         else:
             body_height += line_height
 
-    # Mida de l'avatar (110px)
     avatar_size = 110
     top_padding = 50
     bottom_padding = 40
@@ -433,7 +448,7 @@ def create_tweet_header_image(tweet_text, width=1080):
     img = Image.new("RGBA", (width, header_height), (0, 0, 0, 255))
     draw = ImageDraw.Draw(img)
 
-    # 1. Avatar Circular Ampliat
+    # 1. Avatar Circular
     avatar_x = margin_x
     avatar_y = top_padding
 
@@ -587,7 +602,7 @@ def process_video_canvas(input_path, tweet_text, output_path="final_feedity.mp4"
         y1 = max(0, y - margin_y)
         x2 = min(frame_w, x + w + margin_x)
         y2 = min(frame_h, y + h + margin_y)
-        print(f"✂️ Crop aplicat amb èxit: x={x1}, y={y1}, x2={x2}, y2={y2}")
+        print(f"✂️ Crop aplicat: x={x1}, y={y1}, x2={x2}, y2={y2}")
         cropped_clip = clip.cropped(x1=x1, y1=y1, x2=x2, y2=y2)
     else:
         print("ℹ️ No s'ha detectat cap marc distintiu, s'utilitza el vídeo original.")
@@ -595,13 +610,12 @@ def process_video_canvas(input_path, tweet_text, output_path="final_feedity.mp4"
 
     scaled_clip = cropped_clip.resized(width=1080)
 
-    print("🎨 Renderitzant capçalera estil Tweet amb Plus Jakarta Sans...")
+    print("🎨 Renderitzant capçalera estil Tweet...")
     header_img_np = create_tweet_header_image(tweet_text, width=1080)
     header_h = header_img_np.shape[0]
 
     header_clip = ImageClip(header_img_np).with_duration(scaled_clip.duration)
 
-    # Posicionament
     header_clip = header_clip.with_position(("center", 180))
     video_y_pos = 180 + header_h + 10
     video_positioned = scaled_clip.with_position(("center", video_y_pos))
@@ -635,7 +649,6 @@ def send_telegram_notification(video_path, tweet_text, credits, generated_captio
     safe_credits = html.escape(credits or "No especificada")
     safe_video_id = html.escape(video_id or "")
 
-    # 1. Enviar el vídeo amb el resum bàsic
     video_caption = (
         f"🎬 <b>NOU VÍDEO PROCESSAT PER A FEEDITY</b>\n\n"
         f"📌 <b>Tweet Text</b>:\n<i>{safe_tweet}</i>\n\n"
@@ -657,7 +670,6 @@ def send_telegram_notification(video_path, tweet_text, credits, generated_captio
         else:
             print(f"❌ Error en enviar el vídeo a Telegram: {res_video.text}")
 
-    # 2. Enviar el caption extens per separat
     url_msg = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     caption_text = (
         f"📝 <b>CAPTION PER A PUBLICAR (COPIAR I ENGANXAR)</b>:\n\n"
@@ -670,9 +682,9 @@ def send_telegram_notification(video_path, tweet_text, credits, generated_captio
     }
     res_msg = requests.post(url_msg, data=data_msg)
     if res_msg.status_code == 200:
-        print("📋 Caption extens enviat correctament en missatge separat!")
+        print("📋 Caption extens enviat correctament!")
     else:
-        print(f"⚠️ Error en enviar el text del caption: {res_msg.text}")
+        print(f"⚠️ Error en enviar el caption: {res_msg.text}")
 
 
 # ==========================================
@@ -693,13 +705,7 @@ def _cleanup_temp_input():
 
 
 def get_reel_by_url(reel_url):
-    processed_ids = load_processed_ids()
     shortcode = extract_shortcode(reel_url)
-
-    if shortcode and shortcode in processed_ids and not TEST_MODE:
-        print(f"⏭️ Reel ja processat anteriorment ({shortcode}), s'omet.")
-        return None, None, None, None, None
-
     print(f"⬇️ Descarregant reel amb yt-dlp: {reel_url}")
     _cleanup_temp_input()
 
@@ -725,10 +731,6 @@ def get_reel_by_url(reel_url):
         return None, None, None, None, None
 
     video_id = str(info.get("id") or shortcode or reel_url)
-    if video_id in processed_ids and not TEST_MODE:
-        print(f"⏭️ Reel ja processat anteriorment ({video_id}), s'omet.")
-        return None, None, None, None, None
-
     downloaded_path = ydl.prepare_filename(info)
     if not os.path.exists(downloaded_path):
         candidates = glob.glob("temp_input.*")
@@ -740,7 +742,6 @@ def get_reel_by_url(reel_url):
 
     caption_raw = info.get("description") or ""
 
-    # Extracció del fotograma i anàlisi (Gemini primer -> Groq fallback)
     frame_image = extract_frame_as_image(downloaded_path, timestamp=0.5)
     credits, tweet_text, generated_caption = analyze_content_with_retry(
         frame_image, 
@@ -761,24 +762,38 @@ def main():
         print("❌ No s'ha trobat el fitxer sources.csv")
         return
 
-    with open("sources.csv", "r") as f:
-        reel_urls = [
-            line.strip() for line in f
-            if line.strip() and not line.startswith("reel_url") and not line.startswith("account_handle")
-        ]
+    # Llegir la llista d'enllaços pendents
+    pending_urls = []
+    with open("sources.csv", mode="r", newline="", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        header = next(reader, None)  # Salta la capçalera
+        for row in reader:
+            if not row or len(row) < 1:
+                continue
+            url = row[0].strip()
+            # Si no té columna d'estat o és 'pending', es posa a la cua
+            status = row[1].strip().lower() if len(row) > 1 else "pending"
+            
+            if status == "pending" and url.startswith("http"):
+                pending_urls.append(url)
 
-    for reel_url in reel_urls:
-        print(f"\n🚀 Processant reel: {reel_url}")
+    if not pending_urls:
+        print("ℹ️ No hi ha cap reel amb estat 'pending' a sources.csv.")
+        return
+
+    for reel_url in pending_urls:
+        print(f"\n🚀 Processant reel pendent: {reel_url}")
         video_file, video_id, credits, tweet_text, generated_caption = get_reel_by_url(reel_url)
 
         if video_file and tweet_text:
             process_video_canvas(video_file, tweet_text, "final_feedity.mp4")
             send_telegram_notification("final_feedity.mp4", tweet_text, credits, generated_caption, video_id)
             save_processed_id(video_id)
-            print("✅ Procés finalitzat amb èxit!")
+            update_csv_status(reel_url, "done")
+            print("✅ Procés finalitzat amb èxit i marcat com a 'done'!")
             break
         else:
-            print(f"⚠️ Reel omès o cancel·lat per error d'IA: {reel_url}")
+            print(f"⚠️ Reel omès o fallat: {reel_url}")
 
 
 if __name__ == "__main__":
