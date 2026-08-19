@@ -10,106 +10,135 @@ de vídeos curts (Instagram Reels / TikTok) en format vertical 9:16 (1080x1920 p
 1. VISIÓ GENERAL DEL PIPELINE I FLUX DE DADES
 -------------------------------------------------------------------------------
 
-El sistema processa contingut descarregat d'Instagram a través d'una cadena de
-transformació seqüencial modular:
+El sistema combina una capa serverless d'ingesta ràpida (Telegram + Cloudflare)
+amb un motor d'edició i renderitzat per lots a GitHub Actions:
 
-1. [sources.csv] -> Lectura d'URLs pendents de processar.
-2. Ingestió [yt-dlp] -> Descàrrega en format MP4 (aware de VFR i galetes).
-3. Visió per Computador [OpenCV + NumPy] -> Detecció del requadre del vídeo real
-   mitjançant anàlisi de seqüència contínua (Run-Length) ignorant fons i text.
-4. Intel·ligència Artificial [Gemini Flash -> Groq Fallback] -> OCR del tweet,
-   identificació de l'autor original, paràfrasi a l'anglès amb negretes (**bold**)
-   i generació de caption extens.
-5. Motor Tipogràfic [Pillow] -> Descàrrega de Plus Jakarta Sans, tokenització
-   Markdown i renderitzat de la capçalera estil Tweet (Avatar 110px + Nom + Text).
-6. Composició de Vídeo [MoviePy 2.x] -> Creació del llenç 1080x1920, posicionament
-   vertical relatiu i renderitzat H.264/AAC.
-7. Despatxador [Telegram API] -> Enviament dual: Missatge 1 (Vídeo) +
-   Missatge 2 (Caption llarg en format <code> llest per copiar).
-8. Persistència d'Estat -> Guardat de l'ID a [processed_videos.json].
+1. Ingesta Immediata [Telegram -> Cloudflare Worker -> GitHub API]:
+   L'usuari comparteix un Reel directament al Bot de Telegram. Un Cloudflare Worker
+   serverless valida l'enllaç, comprova el Chat ID autoritzat i afegeix la fila
+   'url,pending' directament a [sources.csv] mitjançant l'API REST de GitHub.
+2. Cua d'Execució [GitHub Actions / Cron]:
+   El pipeline llegeix [sources.csv] i selecciona el primer element amb estat 'pending'.
+3. Descàrrega de Vídeo [yt-dlp]:
+   Descàrrega en format MP4 (amb suport de cookies.txt i gestió de VFR).
+4. Visió per Computador [OpenCV + NumPy]:
+   Detecció del requadre del vídeo real mitjançant anàlisi de seqüència contínua
+   (Run-Length Spatial Span) ignorant fons negres/blancs i text estàtic.
+5. Intel·ligència Artificial [Gemini 3.6 Flash -> Groq Fallback]:
+   Comprensió de l'escena, OCR del text original, identificació de l'autor primari,
+   paràfrasi viral en anglès amb negretes (**bold**) i redacció del caption complet.
+6. Motor Tipogràfic [Pillow]:
+   Descàrrega dinàmica de Plus Jakarta Sans, tokenització Markdown i renderitzat
+   de la capçalera estil Tweet (Avatar 110px + Nom + Text amb salts de línia precisos).
+7. Composició de Vídeo [MoviePy 2.x]:
+   Creació del llenç vertical 1080x1920, posicionament relatiu de la capçalera i del
+   clip retallat, i exportació H.264/AAC a 30 FPS.
+8. Despatxador Dual [Telegram API]:
+   - Missatge 1 (sendVideo): Fitxer MP4 renderitzat + resum tècnic (Tweet, Font, ID).
+   - Missatge 2 (sendMessage): Caption extens dins d'un bloc <code> llest per copiar.
+9. Transició d'Estat i Persistència:
+   - Si té èxit: Marca l'estat a 'done' a [sources.csv], desa l'ID a [processed_videos.json]
+     i finalitza l'execució (1 vídeo per cicle).
+   - Si falla (vídeo privat/esborrat o error d'IA): Marca l'estat a 'failed' a [sources.csv]
+     i avança immediatament al següent element 'pending' de la llista.
+   - El workflow fa commit i push dels canvis a GitHub amb '[skip ci]'.
 
 
 -------------------------------------------------------------------------------
-2. INGESTIÓ I GESTIÓ DE VÍDEO (yt-dlp)
+2. INGESTA CONTINUA I GESTIÓ DE CUA (Cloudflare Worker + sources.csv)
+-------------------------------------------------------------------------------
+
+A. Arquitectura del Webhook Serverless (worker.js):
+   - Hostatjat a Cloudflare Workers (execució a l'Edge, cost zero, actiu 24/7).
+   - Rep peticions POST de Telegram (setWebhook).
+   - Respon SEMPRE amb codi HTTP 200 per evitar que Telegram posi en pausa el webhook.
+   - Comanda de diagnòstic: '/id' o '/start' retorna el Chat ID del remitent.
+   - Filtratge de Seguretat: Comprova que 'chat.id == TELEGRAM_CHAT_ID' abans de processar.
+   - Neteja i deduplicació d'URLs: Extreu el shortcode únic (/reel/SHORTCODE/) i
+     comprova si ja existeix dins de sources.csv abans de fer commit.
+   - Crida a la GitHub Contents API (PUT /repos/:owner/:repo/contents/sources.csv)
+     amb codificació Base64 segura per a caràcters UTF-8.
+
+B. Format del Fitxer sources.csv:
+   Format CSV estàndard amb dues columnes:
+   ----------------------------------------------------
+   reel_url,status
+   https://www.instagram.com/reel/C8XYZ123/,done
+   https://www.instagram.com/reel/DZh4eZEC5gk/,failed
+   https://www.instagram.com/reel/DYCoDpkIKrn/,pending
+   ----------------------------------------------------
+   Valors d'estat permesos:
+   - 'pending': Vídeo a la cua pendent de renderitzar.
+   - 'done': Vídeo processat, renderitzat i notificat amb èxit.
+   - 'failed': Vídeo amb error irrecuperable (esborrat, privat o fallada persistent d'IA).
+
+
+-------------------------------------------------------------------------------
+3. INGESTIÓ I GESTIÓ DE VÍDEO (yt-dlp)
 -------------------------------------------------------------------------------
 
 A. Problemàtica de Frame Rate Variable (VFR):
-   Els vídeos descarregats de xarxes socials utilitzen freqüentment VFR.
-   Utilitzar índexs de fotogrames directes d'OpenCV (CAP_PROP_POS_FRAMES) provoca
-   desplaçaments temporals severs i lectures buides.
+   Els vídeos de xarxes socials utilitzen freqüentment VFR. Utilitzar índexs de
+   fotogrames directes d'OpenCV (CAP_PROP_POS_FRAMES) provoca desplaçaments temporals
+   severs i lectures buides.
    REGLE CRÍTICA: Totes les captures de fotogrames s'han de fer SEMPRE per
    temps absolut en mil·lisegons (CAP_PROP_POS_MSEC o clip.get_frame(t)).
 
 B. Mitigació de Bloquejos i Rate-Limiting:
    Suporta injecció de fitxer de galetes Netscape mitjançant la variable
-   INSTAGRAM_COOKIES_FILE per evitar errors HTTP 429 o pantalles de login des
-   de les adreces IP de GitHub Actions.
+   INSTAGRAM_COOKIES_FILE per evitar errors HTTP 429 des de servidors de GitHub Actions.
 
-C. Idempotència:
-   S'extreu el shortcode únic de cada publicació via regex:
-   r"instagram\.com/(?:reel|reels|p|tv)/([A-Za-z0-9_-]+)"
-   Si el shortcode existeix a processed_videos.json (i TEST_MODE = False),
-   el reel s'omet immediatament sense descarregar.
+C. Idempotència Dual:
+   El pipeline garanteix que cap vídeo es repeteixi mitjançant doble comprovació:
+   1. Filtre d'estat 'pending' a sources.csv.
+   2. Historial persistent d'IDs únics a processed_videos.json.
 
 
 -------------------------------------------------------------------------------
-3. ALGORISME DE VISIÓ PER COMPUTADOR: DETECCIÓ I CROP INTEL·LIGENT (ROI)
+4. ALGORISME DE VISIÓ PER COMPUTADOR: DETECCIÓ I CROP INTEL·LIGENT (ROI)
 -------------------------------------------------------------------------------
 
-A. El Problema:
-   Els vídeos d'origen solen venir encastats en plantilles de memes amb fons
-   sòlids (blanc o negre), capçaleres amb text estàtic i logotips de tercers.
-   La detecció de vores clàssica (Canny) o variància temporal simple falla
-   perquè el text té molt contrast i els marcs poden tenir soroll de compressió.
+A. Objectiu:
+   Aïllar el contingut multimèdia dinàmic descartant capçaleres de text estàtiques,
+   marcs de memes, fons negres/blancs afegits i barres d'interfície d'usuari.
 
-B. Solució Implementada (find_video_box_in_frame):
-
-   1. Estimació del Color de Fons per Mediana (C_bg):
+B. Mètode Implementat (find_video_box_in_frame):
+   1. Estimació del Color de Fons (C_bg):
       Mostreja franges de 15 píxels als extrems superior i inferior del fotograma.
-      S'aplica np.median per eliminar artefactes de compressió de vídeo
-      (on un negre no és [0,0,0] sinó [12,12,12]).
-
+      S'aplica np.median per eliminar artefactes de compressió de vídeo.
    2. Màscara de Primer Pla (Foreground Mask):
-      Calcula la diferència absoluta màxima per canal RGB:
-      diff = max(|Pixel(R,G,B) - C_bg(R,G,B)|)
-      foreground_mask = diff > 30
-
+      diff = max(|Pixel(R,G,B) - C_bg(R,G,B)|) > 30.
    3. Filtre de Text per Seqüència Contínua (Run-Length Spatial Span):
-      - Fonament: El text o avatars només tenen píxels actius dispersos en blocs
-        petits (10-25% de l'amplada). Un vídeo real ocupa una franja contínua
-        superior al 65% de l'amplada de la pantalla.
-      - L'algorisme escaneja fila a fila (y=0 fins a H-1) calculant la seqüència
-        màxima de píxels 'True' consecutius (get_longest_consecutive_run).
-      - Només si la seqüència >= W * 0.65, la fila es classifica com a vídeo.
-      - El primer i últim índex de fila vàlids defineixen y1 i y2.
-
+      El text o logotips contenen píxels actius dispersos en blocs petits (<25% d'amplada).
+      Un vídeo real ocupa una franja contínua superior al 65% de l'amplada de la pantalla.
+      S'escaneja fila a fila calculant la seqüència màxima contínua (get_longest_consecutive_run).
+      Les files amb seqüència >= W * 0.65 defineixen y1 i y2.
    4. Escaneig Horitzontal de Columnes (x1, x2):
-      Dins de la franja y1:y2, es calcula la densitat vertical de cada columna.
-      Les columnes amb una densitat superior al 65% de l'alçada defineixen x1 i x2.
-
+      Dins de la franja y1:y2, les columnes amb densitat vertical > 65% defineixen x1 i x2.
    5. Consens Multi-Temporal (6 fotogrames):
-      Per evitar fallades si un fotograma té una escena fosca o transició a negre,
-      es processen 6 fotogrames al llarg de la durada del clip i es calcula la
-      MEDIANA ESTADÍSTICA de les coordenades:
-      (x_final, y_final, w_final, h_final) = np.median(boxes, axis=0)
+      Es processen 6 fotogrames al llarg de la línia de temps del clip i es calcula
+      la MEDIANA ESTADÍSTICA de les coordenades: (x, y, w, h) = np.median(boxes, axis=0).
 
 
 -------------------------------------------------------------------------------
-4. INTEL·LIGÈNCIA ARTIFICIAL MULTIMODAL I PROMPT ENGINEERING
+5. INTEL·LIGÈNCIA ARTIFICIAL MULTIMODAL I PROMPT ENGINEERING
 -------------------------------------------------------------------------------
 
-A. Jerarquia de Models (Failover Queue):
-   1. Google Gemini (Principal): Models 'gemini-3.6-flash', 'gemini-2.0-flash'.
-   2. Groq Cloud (Fallback): Models 'qwen/qwen3.6-27b',
-      'meta-llama/llama-4-scout-17b-16e-instruct'.
+A. Jerarquia de Models Actius (Failover Queue):
+   1. Google Gemini (Principal - google-genai SDK):
+      - 'gemini-3.6-flash' (Model recomanat d'alta velocitat i precisió)
+      - 'gemini-2.5-flash'
+      - 'gemini-2.0-flash'
+   2. Groq Cloud (Fallback - groq SDK):
+      - 'qwen/qwen3.6-27b' (Visió multimodal)
+      - 'meta-llama/llama-4-scout-17b-16e-instruct'
 
-B. Gestió de Saturació (Errors 503 / High Demand):
-   Si els servidors d'IA estan saturats (error 503), la funció
-   analyze_content_with_retry executa un bucle de 5 intents amb una espera de
-   60 segons entre cadascun.
-   Si després dels 5 intents (5 minuts) cap IA respon:
+B. Gestió de Saturació i Reintents:
+   Si les APIs estan saturades (HTTP 503 / 429), la funció analyze_content_with_retry
+   executa fins a 5 intents esperant 60 segons entre cadascun.
+   Si després de 5 intents cap servei respon:
    - S'envia una alerta d'error crítica a Telegram (send_telegram_alert).
-   - S'avorta el procés del reel per evitar publicar vídeos trencats.
+   - Es marca el vídeo com a 'failed' a sources.csv i s'avança al següent.
 
 C. Regles Estrictes de Prompts:
    1. Detecció d'Autor Original: La IA distingeix entre el compte agregador/curador
@@ -119,46 +148,39 @@ C. Regles Estrictes de Prompts:
    3. Negretes Selectives: S'exigeix a la IA que posi asteriscs Markdown
       **a les 2-4 paraules clau del punchline**.
    4. Regla Anti-Tofu: Prohibició estricta d'emojis i símbols matemàtics a
-      'tweet_text' per evitar que la font renderitzi caràcters desconeguts (≡).
+      'tweet_text' per evitar errors de renderitzat tipogràfic (≡).
    5. Neteja per Regex (clean_tweet_text): Filtre en Python que elimina caràcters
       no alfanumèrics o símbols Unicode suplementaris abans de dibuixar amb Pillow.
 
 
 -------------------------------------------------------------------------------
-5. MOTOR TIPOGRÀFIC I RENDERITZAT DE CAPÇALERA (Pillow)
+6. MOTOR TIPOGRÀFIC I RENDERITZAT DE CAPÇALERA (Pillow)
 -------------------------------------------------------------------------------
 
-A. Per què no s'utilitza MoviePy TextClip per al Tweet:
-   - TextClip no permet estils barrejats (regular + negreta) a la mateixa línia.
-   - Té problemes de càlcul d'alçada d'interlineat i talla l'última línia.
-
-B. Arquitectura del Renderitzador (create_tweet_header_image):
+A. Renderitzador Tipogràfic (create_tweet_header_image):
    1. Descàrrega Dinàmica de Fonts (ensure_fonts):
       Descarrega automàticament els fitxers .ttf oficials de Plus Jakarta Sans
       (Regular, SemiBold, Bold) des del repositori oficial a assets/fonts/.
    2. Tokenitzador Markdown de Dues Fases (tokenize_markdown_text):
-      Transforma el text amb marcadors ** en una llista de tuples:
-      [(paraula, es_negreta), ...]
+      Transforma el text amb marcadors ** en una llista de tuples: [(paraula, es_negreta), ...].
    3. Ajust de Línia amb Mètriques Exactes (wrap_tokenized_text):
       Mesura l'amplada exacta de cada paraula utilitzant la font corresponent
       (Bold o Regular) per calcular el salt de línia amb precisió de píxel.
    4. Jerarquia Visual del Llenç:
-      - Avatar Circular: 110x110 px (carrega assets/logo.png amb Lanczos i
-        màscara el·líptica).
+      - Avatar Circular: 110x110 px (carrega assets/logo.png amb màscara el·líptica).
       - Nom ('Feedity'): 48pt (PlusJakartaSans-SemiBold, Blanc).
       - Username ('@feedity.tv'): 38pt (PlusJakartaSans-Regular, Gris #71767B).
       - Cos del Tweet: 44pt (PlusJakartaSans Regular/Bold, Blanc, interlineat 62px).
 
 
 -------------------------------------------------------------------------------
-6. COMPOSICIÓ DE VÍDEO (MoviePy 2.x)
+7. COMPOSICIÓ DE VÍDEO (MoviePy 2.x)
 -------------------------------------------------------------------------------
 
 - Mida del Llenç: 1080 x 1920 píxels (Fons negre sòlid).
 - Posicionament Vertical:
   * Capçalera Tweet: Posicionada a y = 180 px.
-  * Vídeo retallat (escalat a 1080 px d'amplada): Posicionat just a sota de la
-    capçalera a y = 180 + header_height + 10 px.
+  * Vídeo retallat (escalat a 1080 px d'amplada): Posicionat a y = 180 + header_height + 10 px.
 - Renderitzat d'Exportació:
   * Còdec de vídeo: libx264
   * Còdec d'àudio: aac
@@ -167,45 +189,50 @@ B. Arquitectura del Renderitzador (create_tweet_header_image):
 
 
 -------------------------------------------------------------------------------
-7. DESPATXADOR DE NOTIFICACIONS A TELEGRAM
+8. DESPATXADOR DE NOTIFICACIONS A TELEGRAM
 -------------------------------------------------------------------------------
 
-Per superar el límit de 1024 caràcters de sendVideo de l'API de Telegram,
-la notificació s'envia en DOS missatges independents:
+Per superar el límit de caràcters de l'API de Telegram, la notificació s'emet en DOS missatges:
 
 1. Missatge 1 (sendVideo):
-   Envia el fitxer .mp4 final acompanyat d'un resum de dades bàsiques:
-   Títol del Tweet, Font Original i ID.
+   Fitxer MP4 final + resum bàsic (Tweet Text, Font Original, ID del vídeo).
 
 2. Missatge 2 (sendMessage):
-   Envia el text complet del caption d'Instagram formatat dins d'un bloc de codi
-   HTML <code>. Això permet:
-   - Superar el límit de caràcters (sendMessage suporta fins a 4096 caràcters).
-   - Copiar tot el caption amb un sol toc a la pantalla del mòbil.
-   - Incloure el disclaimer legal invariable al final de tot:
+   Text complet del caption d'Instagram formatat dins d'un bloc de codi HTML <code>.
+   - Permet copiar tot el text amb un sol toc a la pantalla del mòbil.
+   - Inclou el disclaimer legal obligatori invariable a l'última línia:
      "All rights belong to the respective owner. DM for credit or removal."
 
 
 -------------------------------------------------------------------------------
-8. VARIABLES D'ENTORN I SECRETS REQUERITS
+9. VARIABLES D'ENTORN I SECRETS REQUERITS
 -------------------------------------------------------------------------------
 
-TELEGRAM_BOT_TOKEN      : Token del bot de Telegram de @BotFather.
-TELEGRAM_CHAT_ID        : ID del canal o xat receptor de Telegram.
-GEMINI_API_KEY          : Clau d'API gratuïta de Google AI Studio (Model principal).
-GROQ_API_KEY            : Clau d'API gratuïta de Groq Console (Model fallback).
-INSTAGRAM_COOKIES_FILE  : (Opcional) Ruta a cookies.txt exportat del navegador.
-TEST_MODE               : True per proves (no desa a processed_videos.json).
+A. A GitHub Secrets (Actions):
+   - TELEGRAM_BOT_TOKEN      : Token del bot de Telegram de @BotFather.
+   - TELEGRAM_CHAT_ID        : ID numèric de l'usuari o canal receptor.
+   - GEMINI_API_KEY          : Clau d'API de Google AI Studio (Model principal).
+   - GROQ_API_KEY            : Clau d'API de Groq Console (Model fallback).
+   - INSTAGRAM_COOKIES       : (Opcional) Contingut de cookies.txt per a yt-dlp.
+
+B. A Cloudflare Workers (Settings -> Variables):
+   - TELEGRAM_BOT_TOKEN      : Token del bot de Telegram.
+   - TELEGRAM_CHAT_ID        : ID numèric de l'usuari autoritzat.
+   - GITHUB_REPO             : Nom del repositori en format 'usuari/nom-del-repo'.
+   - GITHUB_TOKEN            : Personal Access Token (PAT) de GitHub amb permisos 'repo'.
 
 
 -------------------------------------------------------------------------------
-9. REGLES PER A FUTURES MODIFICACIONS DE CODI
+10. REGLES PER A FUTURES MODIFICACIONS DE CODI
 -------------------------------------------------------------------------------
 
 1. No canvieu la lectura d'OpenCV a índex de fotogrames; mantingueu sempre
    CAP_PROP_POS_MSEC per evitar desincronització amb VFR.
 2. No utilitzeu TextClip de MoviePy per al Tweet; mantingueu la generació per Pillow.
 3. No canvieu l'ordre de prioritat d'IA: Gemini sempre s'ha d'executar primer,
-   i Groq només en cas de fallada o saturació 503.
-4. Mantingueu sempre el disclaimer final de drets a format_final_caption.
+   i Groq només en cas de fallada o saturació.
+4. El Cloudflare Worker ha de retornar SEMPRE HTTP 200 a Telegram.
+5. Mantingueu sempre el disclaimer final de drets a format_final_caption.
+6. Si un vídeo falla durant l'execució, s'ha de marcar com a 'failed' a sources.csv
+   i continuar amb el següent 'pending' per garantir la continuïtat del servei.
 ===============================================================================
