@@ -301,8 +301,7 @@ def analyze_with_groq_vision(image_pil, caption_raw=""):
                 return (
                     data.get("credits", ""),
                     clean_tweet_text(data.get("tweet_text", "")),
-                    format_final_caption(data.get("generated_caption", "")),
-                    data.get("thumbnail_title", "FEATURED STORY").upper()
+                    format_final_caption(data.get("generated_caption", ""))
                 )
         except Exception as e:
             print(f"ℹ️ Groq error ({model_name}): {e}")
@@ -501,11 +500,11 @@ def create_tweet_header_image(tweet_text, width=1080):
 
 
 # ==========================================
-# MINIATURA PERSONALITZADA (EDITÒRIAL / BUFFER COVER)
+# MINIATURA PERSONALITZADA (EDITORIAL / BUFFER COVER)
 # ==========================================
 
 def create_editorial_thumbnail(video_path, thumbnail_title, output_path="final_thumbnail.jpg"):
-    """Genera una miniatura 1080x1920 amb fons desenfocat i text gran a la Safe Zone 1:1."""
+    """Genera una miniatura 1080x1920 amb fons desenfocat, text gran elevat i logo gran a sota."""
     frame_pil = extract_frame_as_image(video_path, timestamp=1.0)
     if not frame_pil:
         frame_pil = extract_frame_as_image(video_path, timestamp=0.5)
@@ -523,18 +522,17 @@ def create_editorial_thumbnail(video_path, thumbnail_title, output_path="final_t
     top = (new_h - 1920) // 2
     bg = bg.crop((left, top, left + 1080, top + 1920))
 
-    # 2. Desenfocament gaussià intens i filtre de contrast fosc
+    # 2. Desenfocament gaussià i filtre fosc
     bg_blurred = bg.filter(ImageFilter.GaussianBlur(radius=30)).convert("RGBA")
-    dark_overlay = Image.new("RGBA", (1080, 1920), (0, 0, 0, 150)) # 60% opacitat
+    dark_overlay = Image.new("RGBA", (1080, 1920), (0, 0, 0, 140))  # 55% opacitat
     bg_final = Image.alpha_composite(bg_blurred, dark_overlay)
 
     draw = ImageDraw.Draw(bg_final)
 
-    # 3. Tipografies per a la miniatura
-    tag_font = get_jakarta_font("bold", size=32)
-    title_font = get_jakarta_font("bold", size=76)
+    # 3. Tipografia per al titular
+    title_font = get_jakarta_font("bold", size=78)
 
-    # 4. Ajustar text en línies dins de 900px
+    # 4. Ajustar text en línies dins de 920px
     words = thumbnail_title.split()
     lines = []
     current_line = []
@@ -542,7 +540,7 @@ def create_editorial_thumbnail(video_path, thumbnail_title, output_path="final_t
     for word in words:
         test_line = " ".join(current_line + [word])
         w = draw.textbbox((0, 0), test_line, font=title_font)[2]
-        if w <= 900:
+        if w <= 920:
             current_line.append(word)
         else:
             if current_line:
@@ -554,38 +552,45 @@ def create_editorial_thumbnail(video_path, thumbnail_title, output_path="final_t
     if current_line:
         lines.append(" ".join(current_line))
 
-    # 5. Càlcul de posició vertical (Centre exacte de la Safe Zone 1:1: y=960)
-    line_h = 95
+    # 5. Càlculs de mides i posicions
+    line_h = 98
     total_title_h = len(lines) * line_h
-    badge_h = 44
-    gap = 28
-    total_block_h = badge_h + gap + total_title_h
-    start_y = 960 - (total_block_h // 2)
+    logo_size = 110  # Mida gran del logo
+    gap = 48         # Espai entre el text i el logo
+    
+    total_block_h = total_title_h + gap + logo_size
+    
+    # Centrat vertical a la Safe Zone (y=960) desplaçat lleugerament cap amunt (-45px)
+    start_y = 960 - (total_block_h // 2) - 45
 
-    # Badge de Feedity
-    badge_text = "FEEDITY EXCLUSIVE"
-    badge_bbox = draw.textbbox((0, 0), badge_text, font=tag_font)
-    badge_w = badge_bbox[2] - badge_bbox[0] + 36
-    badge_x = (1080 - badge_w) // 2
-    badge_y = start_y
-
-    draw.rounded_rectangle(
-        [badge_x, badge_y, badge_x + badge_w, badge_y + badge_h],
-        radius=8,
-        fill=(245, 200, 30) # Groc corporatiu
-    )
-    draw.text((badge_x + 18, badge_y + 6), badge_text, font=tag_font, fill=(0, 0, 0))
-
-    # Titular gran en blanc amb ombra
-    text_y = badge_y + badge_h + gap
+    # 6. Dibuixar Titular (elevat)
+    text_y = start_y
     for line in lines:
         w = draw.textbbox((0, 0), line, font=title_font)[2]
         x = (1080 - w) // 2
-        # Ombra
-        draw.text((x + 3, text_y + 3), line, font=title_font, fill=(0, 0, 0, 200))
+        # Ombra d'alt contrast
+        draw.text((x + 4, text_y + 4), line, font=title_font, fill=(0, 0, 0, 220))
         # Text principal
         draw.text((x, text_y), line, font=title_font, fill=(255, 255, 255))
         text_y += line_h
+
+    # 7. Dibuixar Logo a sota en gran
+    logo_y = text_y + gap
+    logo_x = (1080 - logo_size) // 2
+
+    logo_file = LOGO_PATH if os.path.exists(LOGO_PATH) else ("logo.png" if os.path.exists("logo.png") else None)
+    if logo_file:
+        try:
+            logo_img = Image.open(logo_file).convert("RGBA").resize((logo_size, logo_size), Image.Resampling.LANCZOS)
+            mask = Image.new("L", (logo_size, logo_size), 0)
+            ImageDraw.Draw(mask).ellipse((0, 0, logo_size, logo_size), fill=255)
+            bg_final.paste(logo_img, (logo_x, logo_y), mask)
+        except Exception as e:
+            print(f"⚠️ Error carregant el logo per a la miniatura: {e}")
+    else:
+        name_font = get_jakarta_font("semibold", size=48)
+        draw.ellipse([logo_x, logo_y, logo_x + logo_size, logo_y + logo_size], fill=(22, 24, 28))
+        draw.text((logo_x + 32, logo_y + 20), "F", font=name_font, fill=(245, 200, 30))
 
     # Guardar en format JPG
     bg_final.convert("RGB").save(output_path, "JPEG", quality=95)
@@ -778,7 +783,7 @@ def send_telegram_notification(video_path, thumbnail_path, tweet_text, credits, 
     if thumbnail_path and os.path.exists(thumbnail_path):
         url_photo = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
         with open(thumbnail_path, "rb") as photo_file:
-            photo_caption = f"🖼️ <b>MINIATURA PER A LA GRAELLA (BUFFER COVER)</b>\nTitular centrat a la Safe Zone (1:1)."
+            photo_caption = f"🖼️ <b>MINIATURA PER A LA GRAELLA (BUFFER COVER)</b>\nTitular i logo centrats a la Safe Zone (1:1)."
             files = {"photo": photo_file}
             data = {
                 "chat_id": TELEGRAM_CHAT_ID,
@@ -884,7 +889,6 @@ def main():
         print("❌ No s'ha trobat el fitxer sources.csv")
         return
 
-    # Llegir la llista d'enllaços pendents
     pending_urls = []
     with open("sources.csv", mode="r", newline="", encoding="utf-8") as f:
         reader = csv.reader(f)
