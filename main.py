@@ -99,7 +99,6 @@ def push_media_to_github(video_filename, thumbnail_filename="final_thumbnail.jpg
 
     print("📤 Fent commit i push del vídeo a GitHub abans de cridar Buffer...")
     try:
-        # Netejar possibles vídeos antics que s'hagin quedat al repo
         for f in glob.glob("video_*.mp4"):
             if f != video_filename:
                 try:
@@ -111,7 +110,7 @@ def push_media_to_github(video_filename, thumbnail_filename="final_thumbnail.jpg
         subprocess.run(["git", "commit", "-m", f"Upload {video_filename} for Buffer [skip ci]"], check=False)
         subprocess.run(["git", "push"], check=True)
         print("✅ Vídeo sincronitzat a GitHub amb èxit!")
-        time.sleep(3)  # Petita espera de seguretat perquè GitHub propagui l'arxiu
+        time.sleep(3)
         return True
     except Exception as e:
         print(f"⚠️ Error fent push del vídeo a GitHub: {e}")
@@ -784,11 +783,11 @@ def crop_content_bounding_box(clip, num_samples=6):
 
 
 # ==========================================
-# MINIATURA EDITORIAL (FOTOGRAMA RETALLAT NÍTID + BLUR + LOGO 190PX)
+# MINIATURA EDITORIAL (FONS NEGRE + BLUR DEL VÍDEO RETALLAT + LOGO 190PX)
 # ==========================================
 
 def create_editorial_thumbnail(video_path, thumbnail_title, output_path="final_thumbnail.jpg"):
-    """Genera la miniatura amb el fons blur, el fotograma retallat nítid al centre i el logo de 190px a la Safe Zone."""
+    """Genera la portada amb fons negre, el requadre del vídeo retallat i blurreat al mig, i el logo de 190px a la Safe Zone."""
     clip = VideoFileClip(video_path)
     frame_w, frame_h = clip.w, clip.h
     bbox = crop_content_bounding_box(clip)
@@ -799,7 +798,7 @@ def create_editorial_thumbnail(video_path, thumbnail_title, output_path="final_t
 
     frame_pil = Image.fromarray(frame_np)
 
-    # 1. Aplicar el crop idèntic al del vídeo
+    # 1. Aplicar el crop idèntic al del vídeo per eliminar capçaleres antigues
     min_area_ratio = 0.10
     if bbox and (bbox[2] * bbox[3]) >= min_area_ratio * frame_w * frame_h:
         x, y, w, h = bbox
@@ -813,34 +812,29 @@ def create_editorial_thumbnail(video_path, thumbnail_title, output_path="final_t
     else:
         cropped_frame = frame_pil
 
-    # 2. Crear fons 1080x1920 amb Blur intens
+    # 2. Llenç base: Fons negre sòlid 1080x1920
+    canvas = Image.new("RGBA", (1080, 1920), (0, 0, 0, 255))
+
+    # 3. Escalar el requadre del vídeo a 1080 d'amplada i aplicar el BLUR intens
     w_c, h_c = cropped_frame.size
-    scale_bg = max(1080 / w_c, 1920 / h_c)
-    bg_w, bg_h = int(w_c * scale_bg), int(h_c * scale_bg)
-    bg = cropped_frame.resize((bg_w, bg_h), Image.Resampling.LANCZOS)
-    left = (bg_w - 1080) // 2
-    top = (bg_h - 1920) // 2
-    bg = bg.crop((left, top, left + 1080, top + 1920))
-
-    bg_blurred = bg.filter(ImageFilter.GaussianBlur(radius=35)).convert("RGBA")
-    dark_overlay = Image.new("RGBA", (1080, 1920), (0, 0, 0, 150))
-    bg_canvas = Image.alpha_composite(bg_blurred, dark_overlay)
-
-    # 3. Col·locar el fotograma retallat nítid (sharp) al centre
     scale_fg = 1080 / w_c
     fg_w = 1080
     fg_h = int(h_c * scale_fg)
-    fg_sharp = cropped_frame.resize((fg_w, fg_h), Image.Resampling.LANCZOS).convert("RGBA")
+
+    fg_resized = cropped_frame.resize((fg_w, fg_h), Image.Resampling.LANCZOS)
+    fg_blurred = fg_resized.filter(ImageFilter.GaussianBlur(radius=32)).convert("RGBA")
+
+    # Filtre de contrast fosc sobre el bloc desenfocat
+    dark_tint = Image.new("RGBA", (fg_w, fg_h), (0, 0, 0, 130))
+    fg_box = Image.alpha_composite(fg_blurred, dark_tint)
+
+    # Centrar el requadre blurreat verticalment sobre el fons negre
     fg_y = max(0, (1920 - fg_h) // 2)
-    bg_canvas.paste(fg_sharp, (0, fg_y), fg_sharp)
+    canvas.paste(fg_box, (0, fg_y), fg_box)
 
-    # Filtre de contrast central
-    text_shade = Image.new("RGBA", (1080, 1920), (0, 0, 0, 110))
-    bg_final = Image.alpha_composite(bg_canvas, text_shade)
+    draw = ImageDraw.Draw(canvas)
 
-    draw = ImageDraw.Draw(bg_final)
-
-    # 4. Tipografia del titular
+    # 4. Tipografia del titular i ajust de línies dins de 920px
     title_font = get_jakarta_font("bold", size=76)
     words = thumbnail_title.split()
     lines = []
@@ -861,14 +855,15 @@ def create_editorial_thumbnail(video_path, thumbnail_title, output_path="final_t
     if current_line:
         lines.append(" ".join(current_line))
 
-    # 5. Centrat vertical a y=960 (Safe Zone 1:1)
+    # 5. Centrat vertical exacte a y=960 (Safe Zone 1:1)
     line_h = 96
     total_title_h = len(lines) * line_h
-    logo_size = 190
+    logo_size = 190  # Logotip gegant
     gap = 46
     total_block_h = total_title_h + gap + logo_size
     start_y = 960 - (total_block_h // 2)
 
+    # Dibuixar titular en blanc amb ombra
     text_y = start_y
     for line in lines:
         w = draw.textbbox((0, 0), line, font=title_font)[2]
@@ -887,7 +882,7 @@ def create_editorial_thumbnail(video_path, thumbnail_title, output_path="final_t
             logo_img = Image.open(logo_file).convert("RGBA").resize((logo_size, logo_size), Image.Resampling.LANCZOS)
             mask = Image.new("L", (logo_size, logo_size), 0)
             ImageDraw.Draw(mask).ellipse((0, 0, logo_size, logo_size), fill=255)
-            bg_final.paste(logo_img, (logo_x, logo_y), mask)
+            canvas.paste(logo_img, (logo_x, logo_y), mask)
         except Exception as e:
             print(f"⚠️ Error carregant el logo per a la miniatura: {e}")
     else:
@@ -900,7 +895,7 @@ def create_editorial_thumbnail(video_path, thumbnail_title, output_path="final_t
         f_y = logo_y + (logo_size - f_h) // 2 - f_bbox[1]
         draw.text((f_x, f_y), "f", font=f_font, fill=(255, 255, 255))
 
-    bg_rgb = bg_final.convert("RGB")
+    bg_rgb = canvas.convert("RGB")
     bg_rgb.save(output_path, "JPEG", quality=95)
     print(f"🖼️ Miniatura editorial generada amb èxit a: {output_path}")
     return np.array(bg_rgb), output_path
@@ -1125,7 +1120,7 @@ def main():
         if video_file and tweet_text:
             unique_video_filename = f"video_{video_id}.mp4"
 
-            # 1. Generar la miniatura editorial
+            # 1. Generar la miniatura editorial amb fons negre + crop blurreat al mig + logo 190px
             thumbnail_np, thumbnail_file = create_editorial_thumbnail(video_file, thumbnail_title, "final_thumbnail.jpg")
 
             # 2. Composició de vídeo final (amb el frame 0 de la portada)
