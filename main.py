@@ -20,7 +20,7 @@ from moviepy import VideoFileClip, CompositeVideoClip, ImageClip, concatenate_vi
 # ==========================================
 
 # Canvia manualment aquí entre True (mode proves) i False (mode producció)
-TEST_MODE = True
+TEST_MODE = False
 
 # Secrets i credencials
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
