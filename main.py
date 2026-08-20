@@ -19,7 +19,7 @@ from moviepy import VideoFileClip, CompositeVideoClip, ImageClip, concatenate_vi
 # ==========================================
 
 # Canvia manualment aquí entre True (mode proves) i False (mode producció)
-TEST_MODE = False
+TEST_MODE = True
 
 # Secrets i credencials
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -91,32 +91,30 @@ def update_csv_status(target_url, new_status="done"):
 # PUBLICACIÓ VIA BUFFER GRAPHQL API
 # ==========================================
 
-def get_channel_services(headers):
-    """Obté el diccionari {channel_id: service} des de Buffer."""
+def get_channel_service(channel_id, headers):
+    """Obté el servei del canal (instagram, facebook, tiktok) de manera unitària."""
     query = """
-    query GetChannels {
-      account {
-        organizations {
-          channels {
-            id
-            service
-          }
-        }
+    query GetChannel($input: ChannelInput!) {
+      channel(input: $input) {
+        id
+        service
       }
     }
     """
     try:
-        res = requests.post("https://api.buffer.com", headers=headers, json={"query": query}, timeout=15)
+        res = requests.post(
+            "https://api.buffer.com",
+            headers=headers,
+            json={"query": query, "variables": {"input": {"id": channel_id}}},
+            timeout=15
+        )
         data = res.json()
-        service_map = {}
-        orgs = data.get("data", {}).get("account", {}).get("organizations", [])
-        for org in orgs:
-            for ch in org.get("channels", []):
-                service_map[ch.get("id")] = ch.get("service", "").lower()
-        return service_map
+        ch = (data.get("data") or {}).get("channel")
+        if ch and "service" in ch:
+            return str(ch["service"]).lower()
     except Exception as e:
-        print(f"ℹ️ Consulta de serveis de canal: {e}")
-        return {}
+        print(f"ℹ️ Consulta canal {channel_id}: {e}")
+    return ""
 
 
 def publish_to_buffer(caption_text, video_filename="final_feedity.mp4", thumbnail_offset_ms=0):
@@ -138,9 +136,6 @@ def publish_to_buffer(caption_text, video_filename="final_feedity.mp4", thumbnai
         "Content-Type": "application/json"
     }
 
-    # Obtenir la xarxa social de cada canal connectat
-    service_map = get_channel_services(headers)
-
     mutation = """
     mutation CreatePost($input: CreatePostInput!) {
       createPost(input: $input) {
@@ -159,7 +154,8 @@ def publish_to_buffer(caption_text, video_filename="final_feedity.mp4", thumbnai
 
     all_success = True
     for channel_id in channel_list:
-        service = service_map.get(channel_id, "").lower()
+        # 1. Obtenir servei del canal directament
+        service = get_channel_service(channel_id, headers)
 
         post_input = {
             "channelId": channel_id,
@@ -178,42 +174,61 @@ def publish_to_buffer(caption_text, video_filename="final_feedity.mp4", thumbnai
             ]
         }
 
-        # Configuració de tipus Reel per a Instagram i Facebook
-        if service == "instagram":
+        # 2. Configurar tipus Reel si s'ha detectat el servei
+        if "instagram" in service:
             post_input["metadata"] = {
                 "instagram": {
                     "type": "reel",
                     "shouldShareToFeed": True
                 }
             }
-        elif service == "facebook":
+        elif "facebook" in service:
             post_input["metadata"] = {
                 "facebook": {
                     "type": "reel"
                 }
             }
 
-        try:
-            print(f"🚀 Publicant al canal de Buffer ({service or 'canal'} - {channel_id})...")
-            response = requests.post(
+        def send_request(inp):
+            return requests.post(
                 "https://api.buffer.com",
                 headers=headers,
-                json={"query": mutation, "variables": {"input": post_input}},
+                json={"query": mutation, "variables": {"input": inp}},
                 timeout=30
             )
+
+        try:
+            print(f"🚀 Publicant al canal de Buffer ({service.upper() or 'CANAL'} - {channel_id})...")
+            response = send_request(post_input)
             res_data = response.json()
+
+            result = (res_data.get("data") or {}).get("createPost", {})
+            error_msg = result.get("message") or ""
+
+            # 3. Fail-safe: Reintent intel·ligent si el servei era desconegut i demana format Reel
+            if "Instagram posts require a type" in error_msg:
+                print(f"🔄 Interceptat canal Instagram: Reintentant com a Instagram Reel...")
+                post_input["metadata"] = {"instagram": {"type": "reel", "shouldShareToFeed": True}}
+                response = send_request(post_input)
+                res_data = response.json()
+                result = (res_data.get("data") or {}).get("createPost", {})
+                error_msg = result.get("message") or ""
+            elif "Facebook posts require a type" in error_msg:
+                print(f"🔄 Interceptat canal Facebook: Reintentant com a Facebook Reel...")
+                post_input["metadata"] = {"facebook": {"type": "reel"}}
+                response = send_request(post_input)
+                res_data = response.json()
+                result = (res_data.get("data") or {}).get("createPost", {})
+                error_msg = result.get("message") or ""
 
             if "errors" in res_data:
                 print(f"❌ Error GraphQL al canal {channel_id}: {json.dumps(res_data['errors'], indent=2)}")
                 all_success = False
-                continue
-
-            result = res_data.get("data", {}).get("createPost", {})
-            if "message" in result:
-                print(f"⚠️ Resposta de Buffer al canal {channel_id}: {result['message']}")
+            elif error_msg:
+                print(f"⚠️ Resposta de Buffer al canal {channel_id}: {error_msg}")
                 all_success = False
             elif "post" in result:
-                print(f"🎉 Publicat amb èxit a {service.upper() or channel_id}! Post ID: {result['post']['id']}")
+                print(f"🎉 Publicat amb èxit al canal {service.upper() or channel_id}! Post ID: {result['post']['id']}")
 
         except Exception as e:
             print(f"❌ Error inesperat connectant amb Buffer ({channel_id}): {e}")
