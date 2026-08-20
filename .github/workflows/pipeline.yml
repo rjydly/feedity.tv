@@ -2,8 +2,8 @@ name: Feedity Video Pipeline
 
 on:
   schedule:
-    - cron: '0 */6 * * *'
-  workflow_dispatch:
+    - cron: '0 */6 * * *'  # S'executa automàticament cada 6 hores
+  workflow_dispatch:        # Permet executar-lo manualment des del botó "Run workflow"
 
 jobs:
   build-and-process:
@@ -32,7 +32,7 @@ jobs:
         run: |
           if [ -n "$INSTAGRAM_COOKIES" ]; then
             echo "$INSTAGRAM_COOKIES" > cookies.txt
-            echo "Galetes d'Instagram configurades."
+            echo "Galetes d'Instagram configurades correctament."
           fi
 
       - name: Run Main Script
@@ -42,15 +42,17 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          BUFFER_ACCESS_TOKEN: ${{ secrets.BUFFER_ACCESS_TOKEN }}
+          BUFFER_CHANNEL_IDS: ${{ secrets.BUFFER_CHANNEL_IDS }}
           INSTAGRAM_COOKIES_FILE: "cookies.txt"
-          TEST_MODE: "false"
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: python main.py
 
-      - name: Commit and Push Processed IDs and Sources Status
+      - name: Commit and Push Status and Media
         if: always()
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add processed_videos.json sources.csv || true
-          git commit -m "Update processed videos and sources.csv status [skip ci]" || true
+          git add processed_videos.json sources.csv final_feedity.mp4 final_thumbnail.jpg || true
+          git commit -m "Update pipeline state and media assets [skip ci]" || true
           git push || true
