@@ -19,7 +19,7 @@ from moviepy import VideoFileClip, CompositeVideoClip, ImageClip, concatenate_vi
 # ==========================================
 
 # Canvia manualment aquí entre True (mode proves) i False (mode producció)
-TEST_MODE = False
+TEST_MODE = True
 
 # Secrets i credencials
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -97,7 +97,7 @@ def publish_to_buffer(caption_text, video_filename="final_feedity.mp4", thumbnai
         print("⚠️ Dades de Buffer o GITHUB_REPOSITORY no configurades. S'omet la publicació.")
         return False
 
-    # URL pública del vídeo allotjat a GitHub
+    # URL pública del vídeo al repositori de GitHub
     public_video_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{video_filename}"
     print(f"🌐 URL pública del vídeo per a Buffer: {public_video_url}")
 
@@ -111,56 +111,71 @@ def publish_to_buffer(caption_text, video_filename="final_feedity.mp4", thumbnai
         "Content-Type": "application/json"
     }
 
-    # Mutació GraphQL de Buffer per crear el post amb el primer frame (offset 0)
+    # Mutació GraphQL amb fragments inline vàlids
     mutation = """
     mutation CreatePost($input: CreatePostInput!) {
       createPost(input: $input) {
-        post {
-          id
-          status
+        ... on PostActionSuccess {
+          post {
+            id
+            status
+          }
+        }
+        ... on MutationError {
+          message
         }
       }
     }
     """
 
-    variables = {
-        "input": {
-            "channelIds": channel_list,
-            "text": caption_text,
-            "schedulingType": "now",
-            "assets": [
-                {
-                    "video": {
-                        "url": public_video_url,
-                        "metadata": {
-                            "thumbnailOffset": thumbnail_offset_ms
+    all_success = True
+    for channel_id in channel_list:
+        variables = {
+            "input": {
+                "channelId": channel_id,
+                "text": caption_text,
+                "schedulingType": "automatic",
+                "mode": "shareNow",
+                "assets": [
+                    {
+                        "video": {
+                            "url": public_video_url,
+                            "metadata": {
+                                "thumbnailOffset": thumbnail_offset_ms
+                            }
                         }
                     }
-                }
-            ]
+                ]
+            }
         }
-    }
 
-    try:
-        print("🚀 Enviant petició de publicació a l'API de Buffer...")
-        response = requests.post(
-            "https://api.buffer.com",
-            headers=headers,
-            json={"query": mutation, "variables": variables},
-            timeout=30
-        )
-        res_data = response.json()
+        try:
+            print(f"🚀 Publicant al canal de Buffer ({channel_id})...")
+            response = requests.post(
+                "https://api.buffer.com",
+                headers=headers,
+                json={"query": mutation, "variables": variables},
+                timeout=30
+            )
+            res_data = response.json()
 
-        if "errors" in res_data:
-            print(f"❌ Error retornat per Buffer: {json.dumps(res_data['errors'], indent=2)}")
-            return False
+            if "errors" in res_data:
+                print(f"❌ Error GraphQL al canal {channel_id}: {json.dumps(res_data['errors'], indent=2)}")
+                all_success = False
+                continue
 
-        print("🎉 Publicació enviada correctament a Buffer!")
-        return True
+            result = res_data.get("data", {}).get("createPost", {})
+            if "message" in result:
+                print(f"⚠️ Resposta de Buffer al canal {channel_id}: {result['message']}")
+                all_success = False
+            elif "post" in result:
+                print(f"🎉 Publicat amb èxit al canal {channel_id}! Post ID: {result['post']['id']}")
 
-    except Exception as e:
-        print(f"❌ Error inesperat connectant amb Buffer: {e}")
-        return False
+        except Exception as e:
+            print(f"❌ Error inesperat connectant amb Buffer ({channel_id}): {e}")
+            all_success = False
+
+    return all_success
 
 
 # ==========================================
@@ -383,7 +398,7 @@ def analyze_with_groq_vision(image_pil, caption_raw=""):
                 return (
                     data.get("credits", ""),
                     clean_tweet_text(data.get("tweet_text", "")),
-                    format_final_caption(data.get("generated_caption", "")),
+                    format_final_caption(data.get("generated_caption", ""))
                     data.get("thumbnail_title", "FEATURED STORY").upper()
                 )
         except Exception as e:
