@@ -2,9 +2,8 @@ name: Feedity Video Pipeline
 
 on:
   schedule:
-    # S'executa a les 13:00, 17:00, 21:00 i 01:00 UTC (9:00 AM, 1:00 PM, 5:00 PM i 9:00 PM a Nova York)
     - cron: '0 1,13,17,21 * * *'
-  workflow_dispatch:        # Permet executar-lo manualment des de GitHub quan vulguis
+  workflow_dispatch:
 
 jobs:
   build-and-process:
@@ -26,6 +25,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: Configure Git Identity
+        run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
 
       - name: Create Cookies File if Secret Exists
         env:
@@ -49,11 +53,9 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: python main.py
 
-      - name: Commit and Push Status and Media
+      - name: Final Git Sync
         if: always()
         run: |
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          git add processed_videos.json sources.csv final_feedity.mp4 final_thumbnail.jpg || true
-          git commit -m "Update pipeline state and media assets [skip ci]" || true
+          git add processed_videos.json sources.csv || true
+          git commit -m "Sync final state [skip ci]" || true
           git push || true
