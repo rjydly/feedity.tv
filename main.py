@@ -18,7 +18,7 @@ from moviepy import VideoFileClip, CompositeVideoClip, ImageClip, concatenate_vi
 # CONFIGURACIÓ PRINCIPAL
 # ==========================================
 
-# Canvia manualment aquí entre True (proves) i False (producció)
+# Canvia manualment aquí entre True (mode proves) i False (mode producció)
 TEST_MODE = True
 
 # Secrets i credencials
@@ -27,6 +27,9 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 INSTAGRAM_COOKIES_FILE = os.getenv("INSTAGRAM_COOKIES_FILE")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+BUFFER_ACCESS_TOKEN = os.getenv("BUFFER_ACCESS_TOKEN")
+BUFFER_CHANNEL_IDS = os.getenv("BUFFER_CHANNEL_IDS")  # IDs separats per comes
+GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY")    # ex: "usuari/repositori"
 
 # Rutes de recursos
 ASSETS_DIR = "assets"
@@ -82,6 +85,82 @@ def update_csv_status(target_url, new_status="done"):
         writer = csv.writer(f)
         writer.writerows(rows)
     print(f"📝 sources.csv actualitzat: {target_url} -> {new_status}")
+
+
+# ==========================================
+# PUBLICACIÓ VIA BUFFER GRAPHQL API
+# ==========================================
+
+def publish_to_buffer(caption_text, video_filename="final_feedity.mp4", thumbnail_offset_ms=0):
+    """Publica el vídeo a tots els canals connectats a Buffer."""
+    if not BUFFER_ACCESS_TOKEN or not BUFFER_CHANNEL_IDS or not GITHUB_REPOSITORY:
+        print("⚠️ Dades de Buffer o GITHUB_REPOSITORY no configurades. S'omet la publicació.")
+        return False
+
+    # URL pública del vídeo allotjat a GitHub
+    public_video_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{video_filename}"
+    print(f"🌐 URL pública del vídeo per a Buffer: {public_video_url}")
+
+    channel_list = [c.strip() for c in BUFFER_CHANNEL_IDS.split(",") if c.strip()]
+    if not channel_list:
+        print("⚠️ No hi ha cap channel_id vàlid a BUFFER_CHANNEL_IDS.")
+        return False
+
+    headers = {
+        "Authorization": f"Bearer {BUFFER_ACCESS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+
+    # Mutació GraphQL de Buffer per crear el post amb el primer frame (offset 0)
+    mutation = """
+    mutation CreatePost($input: CreatePostInput!) {
+      createPost(input: $input) {
+        post {
+          id
+          status
+        }
+      }
+    }
+    """
+
+    variables = {
+        "input": {
+            "channelIds": channel_list,
+            "text": caption_text,
+            "schedulingType": "now",
+            "assets": [
+                {
+                    "video": {
+                        "url": public_video_url,
+                        "metadata": {
+                            "thumbnailOffset": thumbnail_offset_ms
+                        }
+                    }
+                }
+            ]
+        }
+    }
+
+    try:
+        print("🚀 Enviant petició de publicació a l'API de Buffer...")
+        response = requests.post(
+            "https://api.buffer.com",
+            headers=headers,
+            json={"query": mutation, "variables": variables},
+            timeout=30
+        )
+        res_data = response.json()
+
+        if "errors" in res_data:
+            print(f"❌ Error retornat per Buffer: {json.dumps(res_data['errors'], indent=2)}")
+            return False
+
+        print("🎉 Publicació enviada correctament a Buffer!")
+        return True
+
+    except Exception as e:
+        print(f"❌ Error inesperat connectant amb Buffer: {e}")
+        return False
 
 
 # ==========================================
@@ -735,7 +814,7 @@ def process_video_canvas(input_path, tweet_text, thumbnail_img_np, output_path="
     # Vídeo principal compost
     main_video_composite = CompositeVideoClip([video_positioned, header_clip], size=(1080, 1920))
 
-    # Incrustar la miniatura com a primer fotograma (1 frame = 1/30 segons)
+    # Incrustar la miniatura com a primer fotograma (1 frame = 1/30 segons = 33 ms)
     cover_clip = ImageClip(thumbnail_img_np).with_duration(1.0 / 30.0)
     final_video = concatenate_videoclips([cover_clip, main_video_composite])
 
@@ -799,7 +878,7 @@ def send_telegram_notification(video_path, thumbnail_path, tweet_text, credits, 
         print("🚀 [Producció] Enviant només resum de confirmació...")
         url_msg = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         confirm_text = (
-            f"✅ <b>VÍDEO PUBLICAT AMB ÈXIT</b>\n\n"
+            f"✅ <b>VÍDEO PUBLICAT A XARXES (BUFFER)</b>\n\n"
             f"📌 <b>Tweet:</b> {safe_tweet}\n"
             f"👤 <b>Font:</b> {safe_credits}\n"
             f"🆔 <b>ID:</b> <code>{safe_video_id}</code>\n"
@@ -925,7 +1004,13 @@ def main():
             # 2. Composició de vídeo final (amb el frame 0 de la portada)
             process_video_canvas(video_file, tweet_text, thumbnail_np, "final_feedity.mp4")
 
-            # 3. Notificació a Telegram segons mode
+            # 3. Publicació a xarxes socials via Buffer (només en producció)
+            if not TEST_MODE:
+                publish_to_buffer(generated_caption, video_filename="final_feedity.mp4", thumbnail_offset_ms=0)
+            else:
+                print("🧪 [Mode Proves Actiu]: S'omet la crida a l'API de Buffer.")
+
+            # 4. Notificació a Telegram segons el mode
             send_telegram_notification(
                 "final_feedity.mp4", 
                 thumbnail_file, 
