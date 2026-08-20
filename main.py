@@ -19,7 +19,7 @@ from moviepy import VideoFileClip, CompositeVideoClip, ImageClip, concatenate_vi
 # ==========================================
 
 # Canvia manualment aquí entre True (mode proves) i False (mode producció)
-TEST_MODE = False
+TEST_MODE = True
 
 # Secrets i credencials
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -91,13 +91,40 @@ def update_csv_status(target_url, new_status="done"):
 # PUBLICACIÓ VIA BUFFER GRAPHQL API
 # ==========================================
 
+def get_channel_services(headers):
+    """Obté el diccionari {channel_id: service} des de Buffer."""
+    query = """
+    query GetChannels {
+      account {
+        organizations {
+          channels {
+            id
+            service
+          }
+        }
+      }
+    }
+    """
+    try:
+        res = requests.post("https://api.buffer.com", headers=headers, json={"query": query}, timeout=15)
+        data = res.json()
+        service_map = {}
+        orgs = data.get("data", {}).get("account", {}).get("organizations", [])
+        for org in orgs:
+            for ch in org.get("channels", []):
+                service_map[ch.get("id")] = ch.get("service", "").lower()
+        return service_map
+    except Exception as e:
+        print(f"ℹ️ Consulta de serveis de canal: {e}")
+        return {}
+
+
 def publish_to_buffer(caption_text, video_filename="final_feedity.mp4", thumbnail_offset_ms=0):
-    """Publica el vídeo a tots els canals connectats a Buffer."""
+    """Publica el vídeo a tots els canals connectats a Buffer (Instagram Reels, TikTok, Facebook Reels)."""
     if not BUFFER_ACCESS_TOKEN or not BUFFER_CHANNEL_IDS or not GITHUB_REPOSITORY:
         print("⚠️ Dades de Buffer o GITHUB_REPOSITORY no configurades. S'omet la publicació.")
         return False
 
-    # URL pública del vídeo al repositori de GitHub
     public_video_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{video_filename}"
     print(f"🌐 URL pública del vídeo per a Buffer: {public_video_url}")
 
@@ -111,7 +138,9 @@ def publish_to_buffer(caption_text, video_filename="final_feedity.mp4", thumbnai
         "Content-Type": "application/json"
     }
 
-    # Mutació GraphQL amb fragments inline vàlids
+    # Obtenir la xarxa social de cada canal connectat
+    service_map = get_channel_services(headers)
+
     mutation = """
     mutation CreatePost($input: CreatePostInput!) {
       createPost(input: $input) {
@@ -130,31 +159,46 @@ def publish_to_buffer(caption_text, video_filename="final_feedity.mp4", thumbnai
 
     all_success = True
     for channel_id in channel_list:
-        variables = {
-            "input": {
-                "channelId": channel_id,
-                "text": caption_text,
-                "schedulingType": "automatic",
-                "mode": "shareNow",
-                "assets": [
-                    {
-                        "video": {
-                            "url": public_video_url,
-                            "metadata": {
-                                "thumbnailOffset": thumbnail_offset_ms
-                            }
+        service = service_map.get(channel_id, "").lower()
+
+        post_input = {
+            "channelId": channel_id,
+            "text": caption_text,
+            "schedulingType": "automatic",
+            "mode": "shareNow",
+            "assets": [
+                {
+                    "video": {
+                        "url": public_video_url,
+                        "metadata": {
+                            "thumbnailOffset": thumbnail_offset_ms
                         }
                     }
-                ]
-            }
+                }
+            ]
         }
 
+        # Configuració de tipus Reel per a Instagram i Facebook
+        if service == "instagram":
+            post_input["metadata"] = {
+                "instagram": {
+                    "type": "reel",
+                    "shouldShareToFeed": True
+                }
+            }
+        elif service == "facebook":
+            post_input["metadata"] = {
+                "facebook": {
+                    "type": "reel"
+                }
+            }
+
         try:
-            print(f"🚀 Publicant al canal de Buffer ({channel_id})...")
+            print(f"🚀 Publicant al canal de Buffer ({service or 'canal'} - {channel_id})...")
             response = requests.post(
                 "https://api.buffer.com",
                 headers=headers,
-                json={"query": mutation, "variables": variables},
+                json={"query": mutation, "variables": {"input": post_input}},
                 timeout=30
             )
             res_data = response.json()
@@ -169,7 +213,7 @@ def publish_to_buffer(caption_text, video_filename="final_feedity.mp4", thumbnai
                 print(f"⚠️ Resposta de Buffer al canal {channel_id}: {result['message']}")
                 all_success = False
             elif "post" in result:
-                print(f"🎉 Publicat amb èxit al canal {channel_id}! Post ID: {result['post']['id']}")
+                print(f"🎉 Publicat amb èxit a {service.upper() or channel_id}! Post ID: {result['post']['id']}")
 
         except Exception as e:
             print(f"❌ Error inesperat connectant amb Buffer ({channel_id}): {e}")
