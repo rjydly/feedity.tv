@@ -2,8 +2,9 @@ name: Feedity Video Pipeline
 
 on:
   schedule:
-    - cron: '0 */6 * * *'  # S'executa automàticament cada 6 hores
-  workflow_dispatch:        # Permet executar-lo manualment des del botó "Run workflow"
+    # S'executa a les 13:00, 17:00, 21:00 i 01:00 UTC (9:00 AM, 1:00 PM, 5:00 PM i 9:00 PM a Nova York)
+    - cron: '0 1,13,17,21 * * *'
+  workflow_dispatch:        # Permet executar-lo manualment des de GitHub quan vulguis
 
 jobs:
   build-and-process:
