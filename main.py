@@ -6,6 +6,7 @@ import glob
 import html
 import time
 import base64
+import subprocess
 from io import BytesIO
 import requests
 import numpy as np
@@ -19,7 +20,7 @@ from moviepy import VideoFileClip, CompositeVideoClip, ImageClip, concatenate_vi
 # ==========================================
 
 # Canvia manualment aquí entre True (mode proves) i False (mode producció)
-TEST_MODE = False
+TEST_MODE = True
 
 # Secrets i credencials
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -28,8 +29,8 @@ INSTAGRAM_COOKIES_FILE = os.getenv("INSTAGRAM_COOKIES_FILE")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 BUFFER_ACCESS_TOKEN = os.getenv("BUFFER_ACCESS_TOKEN")
-BUFFER_CHANNEL_IDS = os.getenv("BUFFER_CHANNEL_IDS")  # IDs separats per comes
-GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY")    # ex: "usuari/repositori"
+BUFFER_CHANNEL_IDS = os.getenv("BUFFER_CHANNEL_IDS")
+GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY")
 
 # Rutes de recursos
 ASSETS_DIR = "assets"
@@ -88,6 +89,36 @@ def update_csv_status(target_url, new_status="done"):
 
 
 # ==========================================
+# GESTIÓ DE MEDIA I COMMIT A GITHUB
+# ==========================================
+
+def push_media_to_github(video_filename, thumbnail_filename="final_thumbnail.jpg"):
+    """Elimina vídeos antics, desa el nou vídeo a Git i fa push ABANS de cridar Buffer."""
+    if TEST_MODE:
+        return True
+
+    print("📤 Fent commit i push del vídeo a GitHub abans de cridar Buffer...")
+    try:
+        # Netejar possibles vídeos antics que s'hagin quedat al repo
+        for f in glob.glob("video_*.mp4"):
+            if f != video_filename:
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+
+        subprocess.run(["git", "add", video_filename, thumbnail_filename, "processed_videos.json", "sources.csv"], check=False)
+        subprocess.run(["git", "commit", "-m", f"Upload {video_filename} for Buffer [skip ci]"], check=False)
+        subprocess.run(["git", "push"], check=True)
+        print("✅ Vídeo sincronitzat a GitHub amb èxit!")
+        time.sleep(3)  # Petita espera de seguretat perquè GitHub propagui l'arxiu
+        return True
+    except Exception as e:
+        print(f"⚠️ Error fent push del vídeo a GitHub: {e}")
+        return False
+
+
+# ==========================================
 # PUBLICACIÓ VIA BUFFER GRAPHQL API
 # ==========================================
 
@@ -117,7 +148,7 @@ def get_channel_service(channel_id, headers):
     return ""
 
 
-def publish_to_buffer(caption_text, video_filename="final_feedity.mp4", thumbnail_offset_ms=0):
+def publish_to_buffer(caption_text, video_filename, thumbnail_offset_ms=0):
     """Publica el vídeo a tots els canals connectats a Buffer (Instagram Reels, TikTok, Facebook Reels)."""
     if not BUFFER_ACCESS_TOKEN or not BUFFER_CHANNEL_IDS or not GITHUB_REPOSITORY:
         print("⚠️ Dades de Buffer o GITHUB_REPOSITORY no configurades. S'omet la publicació.")
@@ -154,7 +185,6 @@ def publish_to_buffer(caption_text, video_filename="final_feedity.mp4", thumbnai
 
     all_success = True
     for channel_id in channel_list:
-        # 1. Obtenir servei del canal directament
         service = get_channel_service(channel_id, headers)
 
         post_input = {
@@ -174,7 +204,6 @@ def publish_to_buffer(caption_text, video_filename="final_feedity.mp4", thumbnai
             ]
         }
 
-        # 2. Configurar tipus Reel si s'ha detectat el servei
         if "instagram" in service:
             post_input["metadata"] = {
                 "instagram": {
@@ -205,16 +234,15 @@ def publish_to_buffer(caption_text, video_filename="final_feedity.mp4", thumbnai
             result = (res_data.get("data") or {}).get("createPost", {})
             error_msg = result.get("message") or ""
 
-            # 3. Fail-safe: Reintent intel·ligent si el servei era desconegut i demana format Reel
             if "Instagram posts require a type" in error_msg:
-                print(f"🔄 Interceptat canal Instagram: Reintentant com a Instagram Reel...")
+                print(f"🔄 Reintentant com a Instagram Reel...")
                 post_input["metadata"] = {"instagram": {"type": "reel", "shouldShareToFeed": True}}
                 response = send_request(post_input)
                 res_data = response.json()
                 result = (res_data.get("data") or {}).get("createPost", {})
                 error_msg = result.get("message") or ""
             elif "Facebook posts require a type" in error_msg:
-                print(f"🔄 Interceptat canal Facebook: Reintentant com a Facebook Reel...")
+                print(f"🔄 Reintentant com a Facebook Reel...")
                 post_input["metadata"] = {"facebook": {"type": "reel"}}
                 response = send_request(post_input)
                 res_data = response.json()
@@ -330,38 +358,43 @@ def image_to_base64_jpeg(image_pil):
 
 
 AI_PROMPT_INSTRUCTIONS = f"""
-Examine this video frame and the original post caption carefully.
+Examine this video frame and the original post description carefully.
+
+CRITICAL CONSISTENCY RULE:
+Both 'tweet_text' and 'generated_caption' MUST be 100% focused on the EXACT SAME topic shown in the video.
+- If the video is a meme, funny moment, or comedy, BOTH the tweet and the caption MUST describe and explain that specific meme/funny situation. NEVER invent an unrelated scientific, historical, or geographical fact!
+- If the video is a scientific discovery or educational fact, explain that specific discovery.
 
 RULES FOR CREDITS:
-1. Identify the TRUE ORIGINAL source/creator of the video (e.g. if the caption says "Media: @voyah__global", "Video by @creator", or shows a primary creator watermark, the credit is @voyah__global).
-2. NEVER credit the reposter / curator account that merely reposted the video (e.g. ignore accounts like @wealth, @pubity, etc. that reshare media).
-3. If no original third-party source/creator is cited, set "credits" to "".
+1. Identify the TRUE ORIGINAL source/creator of the video (e.g. if description says "Media: @creator", "Video by @author", or shows primary watermark, credit is @author).
+2. NEVER credit the reposter / curator aggregator (e.g. ignore @wealth, @pubity, etc.).
+3. If no third-party source is mentioned, set "credits" to "".
 
 RULES FOR TWEET TEXT:
-- Paraphrase the message into a clean, viral tweet in ENGLISH structured into 1 or 2 distinct short paragraphs separated by a blank line (\\n\\n).
+- Paraphrase the video message into a clean, viral tweet in ENGLISH in 1 or 2 short paragraphs (separated by \\n\\n).
 - STRICTLY NO EMOJIS OR UNICODE SYMBOLS in 'tweet_text'.
 - EMPHASIZE 2-4 key punchline words using markdown asterisks **like this**.
 
 RULES FOR THUMBNAIL TITLE ('thumbnail_title'):
-- Create an ultra-punchy, high-impact headline of 3 TO 6 WORDS in UPPERCASE ENGLISH for the Instagram cover.
-- Example: "MARS NIGHT SKY REVEALED" or "THE SECRET MARS VIEW".
+- Ultra-punchy, high-impact headline of 3 TO 6 WORDS in UPPERCASE ENGLISH directly about the video content.
+- Example: "GOOGLE CONFUSED BY GOOGLE" or "THE REAL NIGHT SKY".
 
-RULES FOR THE INSTAGRAM/TIKTOK CAPTION ('generated_caption'):
-Structure the caption in this exact order:
-1. Engaging Hook & detailed backstory / facts explaining the context of what is happening in the video.
-2. Call to Action (CTA) (e.g. 'Would you try this? Let us know below! 👇').
-3. 8-12 targeted viral hashtags.
-4. Credit line (ONLY if a true original source was identified):
+RULES FOR THE CAPTION ('generated_caption'):
+Structure in this exact order:
+1. Engaging Hook & detailed explanation directly about the video subject (context, why it is funny or amazing).
+2. Call to Action (CTA) (e.g. 'Have you ever tried this? Tell us below! 👇').
+3. 8-12 targeted viral hashtags relevant to this specific topic.
+4. Credit line (ONLY if true original source identified):
    Credit: @original_author
-5. AT THE VERY BOTTOM (the last line of the entire caption):
+5. AT THE VERY BOTTOM (last line):
    {DISCLAIMER_TEXT}
 
 Return strictly a JSON object with this format:
 {{
   "credits": "@original_creator_or_empty",
   "tweet_text": "First line hook\\n\\nSecond line with **bold words**.",
-  "thumbnail_title": "MARS NIGHT SKY REVEALED",
-  "generated_caption": "Detailed story/backstory...\\n\\nCTA\\n\\n#hashtags\\n\\nCredit: @original_author\\n\\n{DISCLAIMER_TEXT}"
+  "thumbnail_title": "PUNCHY HEADLINE HERE",
+  "generated_caption": "Detailed story directly about this video...\\n\\nCTA\\n\\n#hashtags\\n\\nCredit: @original_author\\n\\n{DISCLAIMER_TEXT}"
 }}
 """
 
@@ -657,105 +690,6 @@ def create_tweet_header_image(tweet_text, width=1080):
 
 
 # ==========================================
-# MINIATURA PERSONALITZADA (LOGO AMPLIAT / SAFE ZONE 1:1)
-# ==========================================
-
-def create_editorial_thumbnail(video_path, thumbnail_title, output_path="final_thumbnail.jpg"):
-    """Genera la miniatura 1080x1920 amb fons desenfocat, text gran i logo de gran format centrat."""
-    frame_pil = extract_frame_as_image(video_path, timestamp=1.0)
-    if not frame_pil:
-        frame_pil = extract_frame_as_image(video_path, timestamp=0.5)
-
-    if not frame_pil:
-        frame_pil = Image.new("RGB", (1080, 1920), (15, 15, 15))
-
-    # 1. Escalar i retallar el fotograma per omplir 1080x1920
-    w_img, h_img = frame_pil.size
-    scale = max(1080 / w_img, 1920 / h_img)
-    new_w, new_h = int(w_img * scale), int(h_img * scale)
-    bg = frame_pil.resize((new_w, new_h), Image.Resampling.LANCZOS)
-    
-    left = (new_w - 1080) // 2
-    top = (new_h - 1920) // 2
-    bg = bg.crop((left, top, left + 1080, top + 1920))
-
-    # 2. Desenfocament gaussià i filtre de contrast fosc
-    bg_blurred = bg.filter(ImageFilter.GaussianBlur(radius=32)).convert("RGBA")
-    dark_overlay = Image.new("RGBA", (1080, 1920), (0, 0, 0, 150))
-    bg_final = Image.alpha_composite(bg_blurred, dark_overlay)
-
-    draw = ImageDraw.Draw(bg_final)
-
-    # 3. Tipografia del titular
-    title_font = get_jakarta_font("bold", size=78)
-
-    # 4. Ajustar text en línies dins de 920px
-    words = thumbnail_title.split()
-    lines = []
-    current_line = []
-    
-    for word in words:
-        test_line = " ".join(current_line + [word])
-        w = draw.textbbox((0, 0), test_line, font=title_font)[2]
-        if w <= 920:
-            current_line.append(word)
-        else:
-            if current_line:
-                lines.append(" ".join(current_line))
-                current_line = [word]
-            else:
-                lines.append(word)
-                current_line = []
-    if current_line:
-        lines.append(" ".join(current_line))
-
-    # 5. Càlcul d'alçades per al centrat vertical exacte a y=960 (Safe Zone 1:1)
-    line_h = 98
-    total_title_h = len(lines) * line_h
-    logo_size = 190
-    gap = 48
-    total_block_h = total_title_h + gap + logo_size
-    start_y = 960 - (total_block_h // 2)
-
-    # Dibuixar el titular en blanc amb ombra
-    text_y = start_y
-    for line in lines:
-        w = draw.textbbox((0, 0), line, font=title_font)[2]
-        x = (1080 - w) // 2
-        draw.text((x + 4, text_y + 4), line, font=title_font, fill=(0, 0, 0, 220))
-        draw.text((x, text_y), line, font=title_font, fill=(255, 255, 255))
-        text_y += line_h
-
-    # 6. Dibuixar el Logotip Ampliat (190 px) a sota
-    logo_x = (1080 - logo_size) // 2
-    logo_y = start_y + total_title_h + gap
-
-    logo_file = LOGO_PATH if os.path.exists(LOGO_PATH) else ("logo.png" if os.path.exists("logo.png") else None)
-    if logo_file:
-        try:
-            logo_img = Image.open(logo_file).convert("RGBA").resize((logo_size, logo_size), Image.Resampling.LANCZOS)
-            mask = Image.new("L", (logo_size, logo_size), 0)
-            ImageDraw.Draw(mask).ellipse((0, 0, logo_size, logo_size), fill=255)
-            bg_final.paste(logo_img, (logo_x, logo_y), mask)
-        except Exception as e:
-            print(f"⚠️ Error carregant el logo per a la miniatura: {e}")
-    else:
-        draw.ellipse([logo_x, logo_y, logo_x + logo_size, logo_y + logo_size], fill=(245, 200, 30))
-        f_font = get_jakarta_font("bold", size=int(logo_size * 0.65))
-        f_bbox = draw.textbbox((0, 0), "f", font=f_font)
-        f_w = f_bbox[2] - f_bbox[0]
-        f_h = f_bbox[3] - f_bbox[1]
-        f_x = logo_x + (logo_size - f_w) // 2 - f_bbox[0]
-        f_y = logo_y + (logo_size - f_h) // 2 - f_bbox[1]
-        draw.text((f_x, f_y), "f", font=f_font, fill=(255, 255, 255))
-
-    bg_rgb = bg_final.convert("RGB")
-    bg_rgb.save(output_path, "JPEG", quality=95)
-    print(f"🖼️ Miniatura generada amb èxit a: {output_path}")
-    return np.array(bg_rgb), output_path
-
-
-# ==========================================
 # DETECCIÓ I CROP INTEL·LIGENT DE CONTINGUT
 # ==========================================
 
@@ -850,10 +784,133 @@ def crop_content_bounding_box(clip, num_samples=6):
 
 
 # ==========================================
+# MINIATURA EDITORIAL (FOTOGRAMA RETALLAT NÍTID + BLUR + LOGO 190PX)
+# ==========================================
+
+def create_editorial_thumbnail(video_path, thumbnail_title, output_path="final_thumbnail.jpg"):
+    """Genera la miniatura amb el fons blur, el fotograma retallat nítid al centre i el logo de 190px a la Safe Zone."""
+    clip = VideoFileClip(video_path)
+    frame_w, frame_h = clip.w, clip.h
+    bbox = crop_content_bounding_box(clip)
+
+    t_sample = min(1.0, max(clip.duration - 0.1, 0.5)) if clip.duration else 0.5
+    frame_np = clip.get_frame(t_sample)
+    clip.close()
+
+    frame_pil = Image.fromarray(frame_np)
+
+    # 1. Aplicar el crop idèntic al del vídeo
+    min_area_ratio = 0.10
+    if bbox and (bbox[2] * bbox[3]) >= min_area_ratio * frame_w * frame_h:
+        x, y, w, h = bbox
+        margin_x = int(w * 0.01)
+        margin_y = int(h * 0.01)
+        x1 = max(0, x - margin_x)
+        y1 = max(0, y - margin_y)
+        x2 = min(frame_w, x + w + margin_x)
+        y2 = min(frame_h, y + h + margin_y)
+        cropped_frame = frame_pil.crop((x1, y1, x2, y2))
+    else:
+        cropped_frame = frame_pil
+
+    # 2. Crear fons 1080x1920 amb Blur intens
+    w_c, h_c = cropped_frame.size
+    scale_bg = max(1080 / w_c, 1920 / h_c)
+    bg_w, bg_h = int(w_c * scale_bg), int(h_c * scale_bg)
+    bg = cropped_frame.resize((bg_w, bg_h), Image.Resampling.LANCZOS)
+    left = (bg_w - 1080) // 2
+    top = (bg_h - 1920) // 2
+    bg = bg.crop((left, top, left + 1080, top + 1920))
+
+    bg_blurred = bg.filter(ImageFilter.GaussianBlur(radius=35)).convert("RGBA")
+    dark_overlay = Image.new("RGBA", (1080, 1920), (0, 0, 0, 150))
+    bg_canvas = Image.alpha_composite(bg_blurred, dark_overlay)
+
+    # 3. Col·locar el fotograma retallat nítid (sharp) al centre
+    scale_fg = 1080 / w_c
+    fg_w = 1080
+    fg_h = int(h_c * scale_fg)
+    fg_sharp = cropped_frame.resize((fg_w, fg_h), Image.Resampling.LANCZOS).convert("RGBA")
+    fg_y = max(0, (1920 - fg_h) // 2)
+    bg_canvas.paste(fg_sharp, (0, fg_y), fg_sharp)
+
+    # Filtre de contrast central
+    text_shade = Image.new("RGBA", (1080, 1920), (0, 0, 0, 110))
+    bg_final = Image.alpha_composite(bg_canvas, text_shade)
+
+    draw = ImageDraw.Draw(bg_final)
+
+    # 4. Tipografia del titular
+    title_font = get_jakarta_font("bold", size=76)
+    words = thumbnail_title.split()
+    lines = []
+    current_line = []
+
+    for word in words:
+        test_line = " ".join(current_line + [word])
+        w = draw.textbbox((0, 0), test_line, font=title_font)[2]
+        if w <= 920:
+            current_line.append(word)
+        else:
+            if current_line:
+                lines.append(" ".join(current_line))
+                current_line = [word]
+            else:
+                lines.append(word)
+                current_line = []
+    if current_line:
+        lines.append(" ".join(current_line))
+
+    # 5. Centrat vertical a y=960 (Safe Zone 1:1)
+    line_h = 96
+    total_title_h = len(lines) * line_h
+    logo_size = 190
+    gap = 46
+    total_block_h = total_title_h + gap + logo_size
+    start_y = 960 - (total_block_h // 2)
+
+    text_y = start_y
+    for line in lines:
+        w = draw.textbbox((0, 0), line, font=title_font)[2]
+        x = (1080 - w) // 2
+        draw.text((x + 4, text_y + 4), line, font=title_font, fill=(0, 0, 0, 240))
+        draw.text((x, text_y), line, font=title_font, fill=(255, 255, 255))
+        text_y += line_h
+
+    # 6. Dibuixar el Logotip gegant (190 px) a sota
+    logo_x = (1080 - logo_size) // 2
+    logo_y = start_y + total_title_h + gap
+
+    logo_file = LOGO_PATH if os.path.exists(LOGO_PATH) else ("logo.png" if os.path.exists("logo.png") else None)
+    if logo_file:
+        try:
+            logo_img = Image.open(logo_file).convert("RGBA").resize((logo_size, logo_size), Image.Resampling.LANCZOS)
+            mask = Image.new("L", (logo_size, logo_size), 0)
+            ImageDraw.Draw(mask).ellipse((0, 0, logo_size, logo_size), fill=255)
+            bg_final.paste(logo_img, (logo_x, logo_y), mask)
+        except Exception as e:
+            print(f"⚠️ Error carregant el logo per a la miniatura: {e}")
+    else:
+        draw.ellipse([logo_x, logo_y, logo_x + logo_size, logo_y + logo_size], fill=(245, 200, 30))
+        f_font = get_jakarta_font("bold", size=int(logo_size * 0.65))
+        f_bbox = draw.textbbox((0, 0), "f", font=f_font)
+        f_w = f_bbox[2] - f_bbox[0]
+        f_h = f_bbox[3] - f_bbox[1]
+        f_x = logo_x + (logo_size - f_w) // 2 - f_bbox[0]
+        f_y = logo_y + (logo_size - f_h) // 2 - f_bbox[1]
+        draw.text((f_x, f_y), "f", font=f_font, fill=(255, 255, 255))
+
+    bg_rgb = bg_final.convert("RGB")
+    bg_rgb.save(output_path, "JPEG", quality=95)
+    print(f"🖼️ Miniatura editorial generada amb èxit a: {output_path}")
+    return np.array(bg_rgb), output_path
+
+
+# ==========================================
 # RENDERITZAT FINAL (AMB FRAME 0 PORTADA)
 # ==========================================
 
-def process_video_canvas(input_path, tweet_text, thumbnail_img_np, output_path="final_feedity.mp4"):
+def process_video_canvas(input_path, tweet_text, thumbnail_img_np, output_path):
     clip = VideoFileClip(input_path)
     frame_w, frame_h = clip.w, clip.h
     bbox = crop_content_bounding_box(clip)
@@ -921,11 +978,9 @@ def send_telegram_notification(video_path, thumbnail_path, tweet_text, credits, 
     safe_credits = html.escape(credits or "No especificada")
     safe_video_id = html.escape(video_id or "")
 
-    # SI ESTEM EN MODE DE PROVES: enviem el vídeo, la miniatura i el caption complet
     if TEST_MODE:
         print("🧪 [Mode Proves] Enviant vídeo, miniatura i caption per a revisió...")
         
-        # 1. Vídeo
         video_caption = (
             f"🎬 <b>[TEST MODE] NOU VÍDEO PROCESSAT</b>\n\n"
             f"📌 <b>Tweet Text</b>:\n<i>{safe_tweet}</i>\n\n"
@@ -936,18 +991,15 @@ def send_telegram_notification(video_path, thumbnail_path, tweet_text, credits, 
         with open(video_path, "rb") as video_file:
             requests.post(url_video, data={"chat_id": TELEGRAM_CHAT_ID, "caption": video_caption, "parse_mode": "HTML"}, files={"video": video_file})
 
-        # 2. Miniatura
         if thumbnail_path and os.path.exists(thumbnail_path):
             url_photo = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
             with open(thumbnail_path, "rb") as photo_file:
                 requests.post(url_photo, data={"chat_id": TELEGRAM_CHAT_ID, "caption": "🖼️ <b>[TEST MODE] Portada generada</b>", "parse_mode": "HTML"}, files={"photo": photo_file})
 
-        # 3. Caption llest per copiar
         url_msg = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         caption_text = f"📝 <b>[TEST MODE] CAPTION PER A PUBLICAR</b>:\n\n<code>{html.escape(generated_caption)}</code>"
         requests.post(url_msg, data={"chat_id": TELEGRAM_CHAT_ID, "text": caption_text, "parse_mode": "HTML"})
 
-    # SI ESTEM EN PRODUCCIÓ (TEST_MODE = False): només enviem una confirmació de text curt
     else:
         print("🚀 [Producció] Enviant només resum de confirmació...")
         url_msg = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -1041,7 +1093,6 @@ def main():
         print("❌ No s'ha trobat el fitxer sources.csv")
         return
 
-    # Llegir la llista d'enllaços pendents
     pending_urls = []
     with open("sources.csv", mode="r", newline="", encoding="utf-8") as f:
         reader = csv.reader(f)
@@ -1072,21 +1123,26 @@ def main():
         video_file, video_id, credits, tweet_text, generated_caption, thumbnail_title = reel_data
 
         if video_file and tweet_text:
+            unique_video_filename = f"video_{video_id}.mp4"
+
             # 1. Generar la miniatura editorial
             thumbnail_np, thumbnail_file = create_editorial_thumbnail(video_file, thumbnail_title, "final_thumbnail.jpg")
 
             # 2. Composició de vídeo final (amb el frame 0 de la portada)
-            process_video_canvas(video_file, tweet_text, thumbnail_np, "final_feedity.mp4")
+            process_video_canvas(video_file, tweet_text, thumbnail_np, unique_video_filename)
 
-            # 3. Publicació a xarxes socials via Buffer (només en producció)
+            # 3. Guardar i fer PUSH a GitHub ABANS de cridar Buffer per evitar desfasaments
+            push_media_to_github(unique_video_filename, thumbnail_file)
+
+            # 4. Publicació a xarxes socials via Buffer
             if not TEST_MODE:
-                publish_to_buffer(generated_caption, video_filename="final_feedity.mp4", thumbnail_offset_ms=0)
+                publish_to_buffer(generated_caption, video_filename=unique_video_filename, thumbnail_offset_ms=0)
             else:
                 print("🧪 [Mode Proves Actiu]: S'omet la crida a l'API de Buffer.")
 
-            # 4. Notificació a Telegram segons el mode
+            # 5. Notificació a Telegram segons el mode
             send_telegram_notification(
-                "final_feedity.mp4", 
+                unique_video_filename, 
                 thumbnail_file, 
                 tweet_text, 
                 credits, 
