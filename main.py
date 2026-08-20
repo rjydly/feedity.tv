@@ -398,7 +398,7 @@ def analyze_with_groq_vision(image_pil, caption_raw=""):
                 return (
                     data.get("credits", ""),
                     clean_tweet_text(data.get("tweet_text", "")),
-                    format_final_caption(data.get("generated_caption", ""))
+                    format_final_caption(data.get("generated_caption", "")),
                     data.get("thumbnail_title", "FEATURED STORY").upper()
                 )
         except Exception as e:
