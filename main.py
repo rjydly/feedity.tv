@@ -20,7 +20,7 @@ from moviepy import VideoFileClip, CompositeVideoClip, ImageClip, concatenate_vi
 # ==========================================
 
 # Canvia manualment aquí entre True (mode proves) i False (mode producció)
-TEST_MODE = False
+TEST_MODE = True
 
 # Secrets i credencials
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -32,10 +32,11 @@ BUFFER_ACCESS_TOKEN = os.getenv("BUFFER_ACCESS_TOKEN")
 BUFFER_CHANNEL_IDS = os.getenv("BUFFER_CHANNEL_IDS")
 GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY")
 
-# Rutes de recursos
+# Rutes de recursos i carpetes
 ASSETS_DIR = "assets"
 FONTS_DIR = os.path.join(ASSETS_DIR, "fonts")
 LOGO_PATH = os.path.join(ASSETS_DIR, "logo.png")
+VIDEOS_DIR = "videos"
 
 # Text de drets obligatori al final del caption
 DISCLAIMER_TEXT = "All rights belong to the respective owner. DM for credit or removal."
@@ -92,28 +93,38 @@ def update_csv_status(target_url, new_status="done"):
 # GESTIÓ DE MEDIA I COMMIT A GITHUB
 # ==========================================
 
-def push_media_to_github(video_filename, thumbnail_filename="final_thumbnail.jpg"):
-    """Elimina vídeos antics, desa el nou vídeo a Git i fa push ABANS de cridar Buffer."""
+def cleanup_videos_dir(keep_filenames=None):
+    """Elimina fitxers antics de la carpeta videos/."""
+    os.makedirs(VIDEOS_DIR, exist_ok=True)
+    keep_filenames = keep_filenames or []
+    for f in os.listdir(VIDEOS_DIR):
+        if f not in keep_filenames:
+            full_path = os.path.join(VIDEOS_DIR, f)
+            try:
+                if os.path.isfile(full_path):
+                    os.remove(full_path)
+            except OSError:
+                pass
+
+
+def push_media_to_github(video_rel_filename, thumbnail_rel_filename="final_thumbnail.jpg"):
+    """Neteja videos antics, afegeix el nou i fa push a GitHub abans de cridar Buffer."""
     if TEST_MODE:
         return True
 
-    print("📤 Fent commit i push del vídeo a GitHub abans de cridar Buffer...")
+    print("📤 Netejant fitxers antics i fent push a GitHub...")
     try:
-        for f in glob.glob("video_*.mp4"):
-            if f != video_filename:
-                try:
-                    os.remove(f)
-                except OSError:
-                    pass
+        cleanup_videos_dir(keep_filenames=[video_rel_filename, thumbnail_rel_filename])
 
-        subprocess.run(["git", "add", video_filename, thumbnail_filename, "processed_videos.json", "sources.csv"], check=False)
-        subprocess.run(["git", "commit", "-m", f"Upload {video_filename} for Buffer [skip ci]"], check=False)
+        # git add -A garanteix que els fitxers esborrats es registrin a Git
+        subprocess.run(["git", "add", "-A", VIDEOS_DIR, "processed_videos.json", "sources.csv"], check=False)
+        subprocess.run(["git", "commit", "-m", f"Publish {video_rel_filename} [skip ci]"], check=False)
         subprocess.run(["git", "push"], check=True)
-        print("✅ Vídeo sincronitzat a GitHub amb èxit!")
+        print("✅ Carpeta videos/ sincronitzada a GitHub amb èxit!")
         time.sleep(3)
         return True
     except Exception as e:
-        print(f"⚠️ Error fent push del vídeo a GitHub: {e}")
+        print(f"⚠️ Error fent push a GitHub: {e}")
         return False
 
 
@@ -148,12 +159,12 @@ def get_channel_service(channel_id, headers):
 
 
 def publish_to_buffer(caption_text, video_filename, thumbnail_offset_ms=0):
-    """Publica el vídeo a tots els canals connectats a Buffer (Instagram Reels, TikTok, Facebook Reels)."""
+    """Publica el vídeo des de la carpeta videos/ a tots els canals connectats a Buffer."""
     if not BUFFER_ACCESS_TOKEN or not BUFFER_CHANNEL_IDS or not GITHUB_REPOSITORY:
         print("⚠️ Dades de Buffer o GITHUB_REPOSITORY no configurades. S'omet la publicació.")
         return False
 
-    public_video_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{video_filename}"
+    public_video_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{VIDEOS_DIR}/{video_filename}"
     print(f"🌐 URL pública del vídeo per a Buffer: {public_video_url}")
 
     channel_list = [c.strip() for c in BUFFER_CHANNEL_IDS.split(",") if c.strip()]
@@ -234,14 +245,14 @@ def publish_to_buffer(caption_text, video_filename, thumbnail_offset_ms=0):
             error_msg = result.get("message") or ""
 
             if "Instagram posts require a type" in error_msg:
-                print(f"🔄 Reintentant com a Instagram Reel...")
+                print("🔄 Reintentant com a Instagram Reel...")
                 post_input["metadata"] = {"instagram": {"type": "reel", "shouldShareToFeed": True}}
                 response = send_request(post_input)
                 res_data = response.json()
                 result = (res_data.get("data") or {}).get("createPost", {})
                 error_msg = result.get("message") or ""
             elif "Facebook posts require a type" in error_msg:
-                print(f"🔄 Reintentant com a Facebook Reel...")
+                print("🔄 Reintentant com a Facebook Reel...")
                 post_input["metadata"] = {"facebook": {"type": "reel"}}
                 response = send_request(post_input)
                 res_data = response.json()
@@ -786,8 +797,9 @@ def crop_content_bounding_box(clip, num_samples=6):
 # MINIATURA EDITORIAL (FONS NEGRE + BLUR DEL VÍDEO RETALLAT + LOGO 190PX)
 # ==========================================
 
-def create_editorial_thumbnail(video_path, thumbnail_title, output_path="final_thumbnail.jpg"):
+def create_editorial_thumbnail(video_path, thumbnail_title, output_path=os.path.join(VIDEOS_DIR, "final_thumbnail.jpg")):
     """Genera la portada amb fons negre, el requadre del vídeo retallat i blurreat al mig, i el logo de 190px a la Safe Zone."""
+    os.makedirs(VIDEOS_DIR, exist_ok=True)
     clip = VideoFileClip(video_path)
     frame_w, frame_h = clip.w, clip.h
     bbox = crop_content_bounding_box(clip)
@@ -906,6 +918,7 @@ def create_editorial_thumbnail(video_path, thumbnail_title, output_path="final_t
 # ==========================================
 
 def process_video_canvas(input_path, tweet_text, thumbnail_img_np, output_path):
+    os.makedirs(VIDEOS_DIR, exist_ok=True)
     clip = VideoFileClip(input_path)
     frame_w, frame_h = clip.w, clip.h
     bbox = crop_content_bounding_box(clip)
@@ -1088,6 +1101,8 @@ def main():
         print("❌ No s'ha trobat el fitxer sources.csv")
         return
 
+    os.makedirs(VIDEOS_DIR, exist_ok=True)
+
     pending_urls = []
     with open("sources.csv", mode="r", newline="", encoding="utf-8") as f:
         reader = csv.reader(f)
@@ -1118,26 +1133,29 @@ def main():
         video_file, video_id, credits, tweet_text, generated_caption, thumbnail_title = reel_data
 
         if video_file and tweet_text:
-            unique_video_filename = f"video_{video_id}.mp4"
+            unique_video_rel = f"video_{video_id}.mp4"
+            unique_video_path = os.path.join(VIDEOS_DIR, unique_video_rel)
+            thumbnail_rel = "final_thumbnail.jpg"
+            thumbnail_path = os.path.join(VIDEOS_DIR, thumbnail_rel)
 
-            # 1. Generar la miniatura editorial amb fons negre + crop blurreat al mig + logo 190px
-            thumbnail_np, thumbnail_file = create_editorial_thumbnail(video_file, thumbnail_title, "final_thumbnail.jpg")
+            # 1. Generar la miniatura editorial dins de videos/
+            thumbnail_np, thumbnail_file = create_editorial_thumbnail(video_file, thumbnail_title, thumbnail_path)
 
-            # 2. Composició de vídeo final (amb el frame 0 de la portada)
-            process_video_canvas(video_file, tweet_text, thumbnail_np, unique_video_filename)
+            # 2. Composició de vídeo final dins de videos/
+            process_video_canvas(video_file, tweet_text, thumbnail_np, unique_video_path)
 
-            # 3. Guardar i fer PUSH a GitHub ABANS de cridar Buffer per evitar desfasaments
-            push_media_to_github(unique_video_filename, thumbnail_file)
+            # 3. Netejar fitxers antics de videos/ i fer PUSH a GitHub
+            push_media_to_github(unique_video_rel, thumbnail_rel)
 
             # 4. Publicació a xarxes socials via Buffer
             if not TEST_MODE:
-                publish_to_buffer(generated_caption, video_filename=unique_video_filename, thumbnail_offset_ms=0)
+                publish_to_buffer(generated_caption, video_filename=unique_video_rel, thumbnail_offset_ms=0)
             else:
                 print("🧪 [Mode Proves Actiu]: S'omet la crida a l'API de Buffer.")
 
             # 5. Notificació a Telegram segons el mode
             send_telegram_notification(
-                unique_video_filename, 
+                unique_video_path, 
                 thumbnail_file, 
                 tweet_text, 
                 credits, 
