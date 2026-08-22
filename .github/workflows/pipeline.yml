@@ -2,7 +2,8 @@ name: Feedity Video Pipeline
 
 on:
   schedule:
-    - cron: '0 1,13,17,21 * * *'
+    # 10 execucions al dia durant la franja desperta i de màxim trànsit dels EUA (12:00 UTC a 03:00 UTC)
+    - cron: '0 1,3,12,14,15,17,18,20,21,23 * * *'
   workflow_dispatch:
 
 jobs:
