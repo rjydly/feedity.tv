@@ -3,21 +3,22 @@ FEEDITY VIDEO PIPELINE — ESPECIFICACIÓ TÈCNICA I ARQUITECTURA DEL SISTEMA
 ===============================================================================
 Fitxer de referència tècnica per a desenvolupadors i models d'IA.
 Data de revisió: 2026
-Objectiu: Normalització, comprensió visual, redisseny i composició automàtica
-de vídeos curts (Instagram Reels / TikTok) en format vertical 9:16 (1080x1920 px).
+Objectiu: Normalització, comprensió visual, redisseny tipogràfic, generació
+de portades editorials i publicació multicanal 100% autònoma de vídeos curts
+(Instagram Reels / TikTok / Facebook Reels) en format vertical 9:16 (1080x1920 px).
 
 -------------------------------------------------------------------------------
 1. VISIÓ GENERAL DEL PIPELINE I FLUX DE DADES
 -------------------------------------------------------------------------------
 
 El sistema combina una capa serverless d'ingesta ràpida (Telegram + Cloudflare)
-amb un motor d'edició i renderitzat per lots a GitHub Actions:
+amb un motor d'edició a GitHub Actions i un despatxador multicanal a Buffer:
 
 1. Ingesta Immediata [Telegram -> Cloudflare Worker -> GitHub API]:
    L'usuari comparteix un Reel directament al Bot de Telegram. Un Cloudflare Worker
    serverless valida l'enllaç, comprova el Chat ID autoritzat i afegeix la fila
    'url,pending' directament a [sources.csv] mitjançant l'API REST de GitHub.
-2. Cua d'Execució [GitHub Actions / Cron]:
+2. Cua d'Execució [GitHub Actions / Cron 10 cops al dia]:
    El pipeline llegeix [sources.csv] i selecciona el primer element amb estat 'pending'.
 3. Descàrrega de Vídeo [yt-dlp]:
    Descàrrega en format MP4 (amb suport de cookies.txt i gestió de VFR).
@@ -26,22 +27,30 @@ amb un motor d'edició i renderitzat per lots a GitHub Actions:
    (Run-Length Spatial Span) ignorant fons negres/blancs i text estàtic.
 5. Intel·ligència Artificial [Gemini 3.6 Flash -> Groq Fallback]:
    Comprensió de l'escena, OCR del text original, identificació de l'autor primari,
-   paràfrasi viral en anglès amb negretes (**bold**) i redacció del caption complet.
+   paràfrasi viral en anglès amb negretes (**bold**), titular editorial (3-6 paraules)
+   i redacció del caption amb estricta coherència temàtica anti-al·lucinació.
 6. Motor Tipogràfic [Pillow]:
    Descàrrega dinàmica de Plus Jakarta Sans, tokenització Markdown i renderitzat
    de la capçalera estil Tweet (Avatar 110px + Nom + Text amb salts de línia precisos).
-7. Composició de Vídeo [MoviePy 2.x]:
-   Creació del llenç vertical 1080x1920, posicionament relatiu de la capçalera i del
-   clip retallat, i exportació H.264/AAC a 30 FPS.
-8. Despatxador Dual [Telegram API]:
-   - Missatge 1 (sendVideo): Fitxer MP4 renderitzat + resum tècnic (Tweet, Font, ID).
-   - Missatge 2 (sendMessage): Caption extens dins d'un bloc <code> llest per copiar.
-9. Transició d'Estat i Persistència:
-   - Si té èxit: Marca l'estat a 'done' a [sources.csv], desa l'ID a [processed_videos.json]
-     i finalitza l'execució (1 vídeo per cicle).
-   - Si falla (vídeo privat/esborrat o error d'IA): Marca l'estat a 'failed' a [sources.csv]
-     i avança immediatament al següent element 'pending' de la llista.
-   - El workflow fa commit i push dels canvis a GitHub amb '[skip ci]'.
+7. Disseny de Portada Editorial [Pillow]:
+   Llenç 1080x1920 negre sòlid, requadre retallat del vídeo desenfocat (Gaussian Blur)
+   al centre, titular gran blanc amb ombra i logotip corporatiu gegant de 190 px
+   centrats exactament a la Safe Zone 1:1 (y = 960 px).
+8. Composició de Vídeo i Frame 0 [MoviePy 2.x]:
+   Composició vertical 1080x1920 (Capçalera Tweet + Vídeo retallat) i incrustació
+   de la miniatura com a primer fotograma del clip (Frame 0: 1/30 segons = 33.3 ms).
+9. Sincronització Prèvia a GitHub [Git Subprocess]:
+   Eliminació de fitxers temporals antics, commit i push del vídeo únic ('video_{id}.mp4')
+   a GitHub ABANS de cridar Buffer per evitar desfasaments de contingut.
+10. Publicació Multicanal [Buffer GraphQL API]:
+    Publicació simultània a Instagram Reels, TikTok i Facebook Reels mitjançant
+    l'enllaç públic 'raw.githubusercontent.com' amb 'thumbnailOffset: 0'.
+11. Despatxador de Notificacions [Telegram API]:
+    - Si TEST_MODE = True: Enviament complet (Vídeo MP4 + Foto Portada + Caption).
+    - Si TEST_MODE = False (Producció): Missatge de text breu de confirmació (sense arxius pesats).
+12. Transició d'Estat i Persistència:
+    - Si té èxit: Marca 'done' a [sources.csv], desa a [processed_videos.json] i finalitza.
+    - Si falla: Marca 'failed' a [sources.csv] i avança immediatament al següent pendent.
 
 
 -------------------------------------------------------------------------------
@@ -69,8 +78,8 @@ B. Format del Fitxer sources.csv:
    ----------------------------------------------------
    Valors d'estat permesos:
    - 'pending': Vídeo a la cua pendent de renderitzar.
-   - 'done': Vídeo processat, renderitzat i notificat amb èxit.
-   - 'failed': Vídeo amb error irrecuperable (esborrat, privat o fallada persistent d'IA).
+   - 'done': Vídeo processat, renderitzat i publicat amb èxit.
+   - 'failed': Vídeo amb error irrecuperable (esborrat, privat o fallada d'IA).
 
 
 -------------------------------------------------------------------------------
@@ -133,28 +142,22 @@ A. Jerarquia de Models Actius (Failover Queue):
       - 'qwen/qwen3.6-27b' (Visió multimodal)
       - 'meta-llama/llama-4-scout-17b-16e-instruct'
 
-B. Gestió de Saturació i Reintents:
-   Si les APIs estan saturades (HTTP 503 / 429), la funció analyze_content_with_retry
-   executa fins a 5 intents esperant 60 segons entre cadascun.
-   Si després de 5 intents cap servei respon:
-   - S'envia una alerta d'error crítica a Telegram (send_telegram_alert).
-   - Es marca el vídeo com a 'failed' a sources.csv i s'avança al següent.
+B. Regla d'Or de Coherència Temàtica Anti-Al·lucinació:
+   El prompt imposa que 'tweet_text' i 'generated_caption' descriguin estrictament
+   el mateix subjecte i to:
+   - Si el vídeo és un meme/humor: Tant el tweet com el caption han d'explicar el
+     context de comèdia. Queda terminantment prohibit inventar dades científiques inconnexes.
+   - Si el vídeo és educatiu/científic: S'explica la troballa real mostrada.
 
-C. Regles Estrictes de Prompts:
-   1. Detecció d'Autor Original: La IA distingeix entre el compte agregador/curador
-      que ha resubit el vídeo (ex: @wealth, @pubity) i la font real
-      (ex: 'Media: @creador', marques d'aigua primàries). S'ignora l'agregador.
-   2. Format del Tweet: Text en anglès estructurat en 1 o 2 paràgrafs (\n\n).
-   3. Negretes Selectives: S'exigeix a la IA que posi asteriscs Markdown
-      **a les 2-4 paraules clau del punchline**.
-   4. Regla Anti-Tofu: Prohibició estricta d'emojis i símbols matemàtics a
-      'tweet_text' per evitar errors de renderitzat tipogràfic (≡).
-   5. Neteja per Regex (clean_tweet_text): Filtre en Python que elimina caràcters
-      no alfanumèrics o símbols Unicode suplementaris abans de dibuixar amb Pillow.
+C. Estructura de Resposta JSON de la IA:
+   - 'credits': Autor original identificat (o buit).
+   - 'tweet_text': Paràfrasi viral en anglès (1-2 paràgrafs, sense emojis, 2-4 paraules en **bold**).
+   - 'thumbnail_title': Titular agressiu de 3 a 6 paraules en majúscules.
+   - 'generated_caption': Història explicativa + CTA + 8-12 hashtags + crèdits + disclaimer legal.
 
 
 -------------------------------------------------------------------------------
-6. MOTOR TIPOGRÀFIC I RENDERITZAT DE CAPÇALERA (Pillow)
+6. MOTOR TIPOGRÀFIC I CAPÇALERA DE TWEET (Pillow)
 -------------------------------------------------------------------------------
 
 A. Renderitzador Tipogràfic (create_tweet_header_image):
@@ -174,65 +177,133 @@ A. Renderitzador Tipogràfic (create_tweet_header_image):
 
 
 -------------------------------------------------------------------------------
-7. COMPOSICIÓ DE VÍDEO (MoviePy 2.x)
+7. GENERACIÓ DE MINIATURA EDITORIAL I SAFE ZONE 1:1 (Pillow)
+-------------------------------------------------------------------------------
+
+A. Arquitectura Visual (create_editorial_thumbnail):
+   1. Fons: Llenç negre sòlid 1080x1920 px.
+   2. Bloc Central de Vídeo: Fotograma extret del vídeo amb crop aplicat, escalat a
+      1080 px d'amplada, centrat verticalment i amb desenfocament gaussià intens
+      (GaussianBlur radius=32) més un filtre fosc (RGBA 0,0,0,130).
+   3. Safe Zone 1:1 d'Instagram: Tot el text i el logotip se situen centrats
+      al voltant de l'eix vertical y = 960 px (entre y=420 i y=1500 px).
+   4. Titular: Tipografia Plus Jakarta Sans Bold 76pt en blanc amb ombra reforçada (y=start_y).
+   5. Logotip Gegant: Cercle de 190 px de diàmetre (carrega logo.png o dibuixa cercle groc
+      amb la 'f' blanca) posicionat just a sota del titular amb un gap de 46 px.
+   6. Exportació: Desar en format JPEG d'alta qualitat (final_thumbnail.jpg).
+
+
+-------------------------------------------------------------------------------
+8. COMPOSICIÓ DE VÍDEO I EMBEDDING DE FRAME 0 (MoviePy 2.x)
 -------------------------------------------------------------------------------
 
 - Mida del Llenç: 1080 x 1920 píxels (Fons negre sòlid).
-- Posicionament Vertical:
+- Posicionament Vertical del Vídeo:
   * Capçalera Tweet: Posicionada a y = 180 px.
-  * Vídeo retallat (escalat a 1080 px d'amplada): Posicionat a y = 180 + header_height + 10 px.
-- Renderitzat d'Exportació:
-  * Còdec de vídeo: libx264
-  * Còdec d'àudio: aac
-  * FPS: 30
-  * Preset: fast
+  * Vídeo retallat (1080 px amplada): Posicionat a y = 180 + header_height + 10 px.
+- Embedding del Frame 0 (Thumbnail Offset 0 ms):
+  * Es genera un clip estàtic de la portada editorial:
+    cover_clip = ImageClip(thumbnail_np).with_duration(1.0 / 30.0) # Exactament 33.3 ms
+  * S'encadena a l'inici del clip principal:
+    final_video = concatenate_videoclips([cover_clip, main_composite_clip])
+  * Permet a Buffer, Instagram i TikTok extreure la portada exacta amb 'thumbnailOffset: 0'
+    sense que l'espectador percebi cap interrupció visual en prémer Play.
+- Exportació: Còdec libx264, àudio aac, 30 FPS, preset fast ('video_{id}.mp4').
 
 
 -------------------------------------------------------------------------------
-8. DESPATXADOR DE NOTIFICACIONS A TELEGRAM
+9. PUBLICACIÓ MULTICANAL I SINCRONITZACIÓ GIT (Buffer API)
 -------------------------------------------------------------------------------
 
-Per superar el límit de caràcters de l'API de Telegram, la notificació s'emet en DOS missatges:
+A. Sincronització Prèvia (push_media_to_github):
+   - Per evitar el desfasament on Buffer descarregava el vídeo del torn anterior,
+     el script executa 'git commit' i 'git push' del nou arxiu 'video_{id}.mp4'
+     ABANS d'executar les crides a l'API de Buffer.
+   - Neteja automàtica: Elimina fitxers 'video_*.mp4' anteriors per mantenir el repo lleuger.
 
-1. Missatge 1 (sendVideo):
-   Fitxer MP4 final + resum bàsic (Tweet Text, Font Original, ID del vídeo).
-
-2. Missatge 2 (sendMessage):
-   Text complet del caption d'Instagram formatat dins d'un bloc de codi HTML <code>.
-   - Permet copiar tot el text amb un sol toc a la pantalla del mòbil.
-   - Inclou el disclaimer legal obligatori invariable a l'última línia:
-     "All rights belong to the respective owner. DM for credit or removal."
+B. Publicació via GraphQL Mutation (publish_to_buffer):
+   - Endpoint: https://api.buffer.com
+   - URL del Vídeo Públic: https://raw.githubusercontent.com/:repo/main/video_:id.mp4
+   - Consulta Unitària de Canal: Identifica el servei de cada ID via 'GetChannel'.
+   - Assignació de Metadades per Xarxa:
+     * Instagram Reels: metadata: { instagram: { type: "reel", shouldShareToFeed: true } }
+     * Facebook Reels: metadata: { facebook: { type: "reel" } }
+     * TikTok: Enviament estàndard directe.
+   - Reintent Intel·ligent (Fail-Safe): Si la resposta conté 'require a type',
+     intercepta l'error i re-envia la mutació injectant el format Reel adequat a l'acte.
 
 
 -------------------------------------------------------------------------------
-9. VARIABLES D'ENTORN I SECRETS REQUERITS
+10. MODES D'OPERACIÓ (TEST_MODE) I TELEGRAM
+-------------------------------------------------------------------------------
+
+El comportament es controla mitjançant la variable booleana TEST_MODE a main.py:
+
+A. Mode de Proves (TEST_MODE = True):
+   - NO publica a Buffer.
+   - NO desa a processed_videos.json ni canvia l'estat a sources.csv.
+   - Envia per Telegram: Vídeo MP4 (sendVideo) + Foto Portada (sendPhoto) + Caption (sendMessage).
+
+B. Mode de Producció (TEST_MODE = False):
+   - Publica automàticament a Instagram, TikTok i Facebook via Buffer.
+   - Desa l'ID a processed_videos.json i marca 'done' a sources.csv.
+   - Envia per Telegram: Únicament un missatge de text breu de confirmació amb l'ID
+     i el títol (evitant descarregar arxius pesats al dispositiu mòbil).
+
+
+-------------------------------------------------------------------------------
+11. PROGRAMACIÓ I HORARIS EUA (GitHub Actions Cron)
+-------------------------------------------------------------------------------
+
+El pipeline s'executa 10 vegades al dia cobrint la franja desperta i d'alta audiència
+dels Estats Units (de 08:00 AM a 11:00 PM EST/EDT):
+
+Cron Expression: '0 1,3,12,14,15,17,18,20,21,23 * * *'
+
+| # | Moment del dia EUA | Nova York (EDT) | Los Angeles (PDT) | Hora Espanya | Hora UTC (Cron) |
+| :-: | :--- | :--- | :--- | :--- | :--- |
+| 1 | Matí (Inici dia) | 08:00 AM | 05:00 AM | 14:00 h | 12:00 UTC |
+| 2 | Mig matí | 10:00 AM | 07:00 AM | 16:00 h | 14:00 UTC |
+| 3 | Pre-dinar | 11:00 AM | 08:00 AM | 17:00 h | 15:00 UTC |
+| 4 | Dinar / Lunch | 01:00 PM | 10:00 AM | 19:00 h | 17:00 UTC |
+| 5 | Primera hora tarda | 02:00 PM | 11:00 AM | 20:00 h | 18:00 UTC |
+| 6 | Mitja tarda | 04:00 PM | 01:00 PM | 22:00 h | 20:00 UTC |
+| 7 | Sortida de feina | 05:00 PM | 02:00 PM | 23:00 h | 21:00 UTC |
+| 8 | Sopar / Vespre | 07:00 PM | 04:00 PM | 01:00 h | 23:00 UTC |
+| 9 | Prime Time (Nit) | 09:00 PM | 06:00 PM | 03:00 h | 01:00 UTC |
+| 10| Tancament de dia | 11:00 PM | 08:00 PM | 05:00 h | 03:00 UTC |
+
+
+-------------------------------------------------------------------------------
+12. VARIABLES D'ENTORN I SECRETS REQUERITS
 -------------------------------------------------------------------------------
 
 A. A GitHub Secrets (Actions):
    - TELEGRAM_BOT_TOKEN      : Token del bot de Telegram de @BotFather.
-   - TELEGRAM_CHAT_ID        : ID numèric de l'usuari o canal receptor.
+   - TELEGRAM_CHAT_ID        : ID numèric de l'usuari receptor.
    - GEMINI_API_KEY          : Clau d'API de Google AI Studio (Model principal).
    - GROQ_API_KEY            : Clau d'API de Groq Console (Model fallback).
+   - BUFFER_ACCESS_TOKEN     : Token d'accés de l'API de Buffer.
+   - BUFFER_CHANNEL_IDS      : IDs dels canals connectats separats per comes.
    - INSTAGRAM_COOKIES       : (Opcional) Contingut de cookies.txt per a yt-dlp.
 
 B. A Cloudflare Workers (Settings -> Variables):
    - TELEGRAM_BOT_TOKEN      : Token del bot de Telegram.
    - TELEGRAM_CHAT_ID        : ID numèric de l'usuari autoritzat.
    - GITHUB_REPO             : Nom del repositori en format 'usuari/nom-del-repo'.
-   - GITHUB_TOKEN            : Personal Access Token (PAT) de GitHub amb permisos 'repo'.
+   - GITHUB_TOKEN            : Personal Access Token (PAT) de GitHub amb permís 'repo'.
 
 
 -------------------------------------------------------------------------------
-10. REGLES PER A FUTURES MODIFICACIONS DE CODI
+13. REGLES INVARIABLES PER A FUTURES MODIFICACIONS
 -------------------------------------------------------------------------------
 
-1. No canvieu la lectura d'OpenCV a índex de fotogrames; mantingueu sempre
-   CAP_PROP_POS_MSEC per evitar desincronització amb VFR.
-2. No utilitzeu TextClip de MoviePy per al Tweet; mantingueu la generació per Pillow.
-3. No canvieu l'ordre de prioritat d'IA: Gemini sempre s'ha d'executar primer,
-   i Groq només en cas de fallada o saturació.
+1. Mantingueu sempre CAP_PROP_POS_MSEC a OpenCV per evitar desincronització amb VFR.
+2. Mantingueu el renderitzat del Tweet per Pillow (mai MoviePy TextClip).
+3. Ordre d'IA: Google Gemini 3.6 Flash com a principal, Groq com a fallback.
 4. El Cloudflare Worker ha de retornar SEMPRE HTTP 200 a Telegram.
-5. Mantingueu sempre el disclaimer final de drets a format_final_caption.
-6. Si un vídeo falla durant l'execució, s'ha de marcar com a 'failed' a sources.csv
-   i continuar amb el següent 'pending' per garantir la continuïtat del servei.
+5. El vídeo s'ha de commitejar i pujar a Git SEMPRE ABANS de cridar Buffer.
+6. Si un vídeo falla, s'ha de marcar com a 'failed' a sources.csv i continuar
+   immediatament amb el següent 'pending' per no bloquejar el flux.
+7. Mantingueu sempre el disclaimer final invariable a format_final_caption.
 ===============================================================================
