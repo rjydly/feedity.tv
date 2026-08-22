@@ -35,16 +35,17 @@ amb un motor d'edició a GitHub Actions i un despatxador multicanal a Buffer:
 7. Disseny de Portada Editorial [Pillow]:
    Llenç 1080x1920 negre sòlid, requadre retallat del vídeo desenfocat (Gaussian Blur)
    al centre, titular gran blanc amb ombra i logotip corporatiu gegant de 190 px
-   centrats exactament a la Safe Zone 1:1 (y = 960 px).
+   centrats exactament a la Safe Zone 1:1 (y = 960 px), desat a videos/final_thumbnail.jpg.
 8. Composició de Vídeo i Frame 0 [MoviePy 2.x]:
    Composició vertical 1080x1920 (Capçalera Tweet + Vídeo retallat) i incrustació
-   de la miniatura com a primer fotograma del clip (Frame 0: 1/30 segons = 33.3 ms).
-9. Sincronització Prèvia a GitHub [Git Subprocess]:
-   Eliminació de fitxers temporals antics, commit i push del vídeo únic ('video_{id}.mp4')
-   a GitHub ABANS de cridar Buffer per evitar desfasaments de contingut.
+   de la miniatura com a primer fotograma del clip (Frame 0: 1/30 segons = 33.3 ms),
+   desat a videos/video_{id}.mp4.
+9. Neteja de Media i Sincronització Prèvia [Git Subprocess]:
+   Eliminació de fitxers antics dins de 'videos/', commit i push de la carpeta
+   'videos/' amb 'git add -A' a GitHub ABANS de cridar Buffer per evitar desfasaments.
 10. Publicació Multicanal [Buffer GraphQL API]:
     Publicació simultània a Instagram Reels, TikTok i Facebook Reels mitjançant
-    l'enllaç públic 'raw.githubusercontent.com' amb 'thumbnailOffset: 0'.
+    l'enllaç públic 'raw.githubusercontent.com/.../main/videos/video_{id}.mp4' amb 'thumbnailOffset: 0'.
 11. Despatxador de Notificacions [Telegram API]:
     - Si TEST_MODE = True: Enviament complet (Vídeo MP4 + Foto Portada + Caption).
     - Si TEST_MODE = False (Producció): Missatge de text breu de confirmació (sense arxius pesats).
@@ -181,16 +182,16 @@ A. Renderitzador Tipogràfic (create_tweet_header_image):
 -------------------------------------------------------------------------------
 
 A. Arquitectura Visual (create_editorial_thumbnail):
-   1. Fons: Llenç negre sòlid 1080x1920 px.
-   2. Bloc Central de Vídeo: Fotograma extret del vídeo amb crop aplicat, escalat a
+   1. Carpeta de Destí: S'emmagatzema automàticament a 'videos/final_thumbnail.jpg'.
+   2. Llenç Base: Fons negre sòlid 1080x1920 px.
+   3. Bloc Central de Vídeo: Fotograma extret del vídeo amb crop aplicat, escalat a
       1080 px d'amplada, centrat verticalment i amb desenfocament gaussià intens
       (GaussianBlur radius=32) més un filtre fosc (RGBA 0,0,0,130).
-   3. Safe Zone 1:1 d'Instagram: Tot el text i el logotip se situen centrats
+   4. Safe Zone 1:1 d'Instagram: Tot el text i el logotip se situen centrats
       al voltant de l'eix vertical y = 960 px (entre y=420 i y=1500 px).
-   4. Titular: Tipografia Plus Jakarta Sans Bold 76pt en blanc amb ombra reforçada (y=start_y).
-   5. Logotip Gegant: Cercle de 190 px de diàmetre (carrega logo.png o dibuixa cercle groc
-      amb la 'f' blanca) posicionat just a sota del titular amb un gap de 46 px.
-   6. Exportació: Desar en format JPEG d'alta qualitat (final_thumbnail.jpg).
+   5. Titular: Tipografia Plus Jakarta Sans Bold 76pt en blanc amb ombra reforçada.
+   6. Logotip Gegant: Cercle de 190 px de diàmetre (carrega assets/logo.png o dibuixa
+      cercle groc amb la 'f' blanca) posicionat just a sota del titular amb un gap de 46 px.
 
 
 -------------------------------------------------------------------------------
@@ -208,22 +209,25 @@ A. Arquitectura Visual (create_editorial_thumbnail):
     final_video = concatenate_videoclips([cover_clip, main_composite_clip])
   * Permet a Buffer, Instagram i TikTok extreure la portada exacta amb 'thumbnailOffset: 0'
     sense que l'espectador percebi cap interrupció visual en prémer Play.
-- Exportació: Còdec libx264, àudio aac, 30 FPS, preset fast ('video_{id}.mp4').
+- Exportació: Còdec libx264, àudio aac, 30 FPS, preset fast ('videos/video_{id}.mp4').
 
 
 -------------------------------------------------------------------------------
-9. PUBLICACIÓ MULTICANAL I SINCRONITZACIÓ GIT (Buffer API)
+9. GESTIÓ D'EMMAGATZEMATGE 'videos/' I PUBLICACIÓ BUFFER
 -------------------------------------------------------------------------------
 
-A. Sincronització Prèvia (push_media_to_github):
-   - Per evitar el desfasament on Buffer descarregava el vídeo del torn anterior,
-     el script executa 'git commit' i 'git push' del nou arxiu 'video_{id}.mp4'
-     ABANS d'executar les crides a l'API de Buffer.
-   - Neteja automàtica: Elimina fitxers 'video_*.mp4' anteriors per mantenir el repo lleuger.
+A. Gestió i Neteja de la Carpeta 'videos/':
+   - La carpeta 'videos/' es crea automàticament si no existeix (os.makedirs).
+   - Neteja prèvia (cleanup_videos_dir): Abans de sincronitzar el nou vídeo, s'esborren
+     tots els fitxers antics de 'videos/' deixant únicament el vídeo i miniatura actius.
+   - Sincronització Git Prèvia (push_media_to_github):
+     S'executa 'git add -A videos/' per registrar tant la pujada del nou fitxer com
+     l'eliminació dels obsolets a Git ABANS de cridar l'API de Buffer. Això elimina
+     al 100% qualsevol desfasament temporal entre vídeo i caption.
 
 B. Publicació via GraphQL Mutation (publish_to_buffer):
    - Endpoint: https://api.buffer.com
-   - URL del Vídeo Públic: https://raw.githubusercontent.com/:repo/main/video_:id.mp4
+   - URL del Vídeo Públic: https://raw.githubusercontent.com/:repo/main/videos/video_:id.mp4
    - Consulta Unitària de Canal: Identifica el servei de cada ID via 'GetChannel'.
    - Assignació de Metadades per Xarxa:
      * Instagram Reels: metadata: { instagram: { type: "reel", shouldShareToFeed: true } }
@@ -302,8 +306,10 @@ B. A Cloudflare Workers (Settings -> Variables):
 2. Mantingueu el renderitzat del Tweet per Pillow (mai MoviePy TextClip).
 3. Ordre d'IA: Google Gemini 3.6 Flash com a principal, Groq com a fallback.
 4. El Cloudflare Worker ha de retornar SEMPRE HTTP 200 a Telegram.
-5. El vídeo s'ha de commitejar i pujar a Git SEMPRE ABANS de cridar Buffer.
-6. Si un vídeo falla, s'ha de marcar com a 'failed' a sources.csv i continuar
+5. Els arxius de vídeo s'han de desar sempre dins de 'videos/'.
+6. La sincronització Git (git add -A videos/ && git push) s'ha d'executar SEMPRE
+   ABANS de cridar l'API de Buffer.
+7. Si un vídeo falla, s'ha de marcar com a 'failed' a sources.csv i continuar
    immediatament amb el següent 'pending' per no bloquejar el flux.
-7. Mantingueu sempre el disclaimer final invariable a format_final_caption.
+8. Mantingueu sempre el disclaimer final invariable a format_final_caption.
 ===============================================================================
