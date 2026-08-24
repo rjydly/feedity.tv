@@ -2,7 +2,8 @@ name: Feedity Video Pipeline
 
 on:
   schedule:
-    - cron: '0 1,3,12,14,15,17,18,20,21,23 * * *'
+    # S'executa 3 cops al dia (10:00, 16:00 i 22:00 UTC)
+    - cron: '0 10,16,22 * * *'
   workflow_dispatch:
 
 jobs:
