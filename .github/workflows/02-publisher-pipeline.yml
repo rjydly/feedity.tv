@@ -1,0 +1,70 @@
+name: 2. Publish Viral Reel Pipeline
+
+on:
+  schedule:
+    - cron: '0 10,16,22 * * *' # 3 cops al dia (10:00, 16:00, 22:00 UTC)
+  workflow_dispatch:
+
+jobs:
+  publish-video:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install System Dependencies (FFmpeg)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install --upgrade yt-dlp
+
+      - name: Configure Git Identity
+        run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+
+      - name: Create Cookies File if Secret Exists
+        env:
+          INSTAGRAM_COOKIES: ${{ secrets.INSTAGRAM_COOKIES }}
+        run: |
+          if [ -n "$INSTAGRAM_COOKIES" ]; then
+            echo "$INSTAGRAM_COOKIES" > cookies.txt
+          fi
+
+      - name: Run Publisher Runner
+        env:
+          PYTHONUNBUFFERED: "1"
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          BUFFER_ACCESS_TOKEN: ${{ secrets.BUFFER_ACCESS_TOKEN }}
+          BUFFER_CHANNEL_IDS: ${{ secrets.BUFFER_CHANNEL_IDS }}
+          INSTAGRAM_COOKIES_FILE: "cookies.txt"
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python publisher_runner.py
+
+      - name: Final Git Sync
+        if: always()
+        run: |
+          git pull --rebase origin main || true
+          git add -A videos/ processed_videos.json sources.csv today_queue.json backup_reels.csv || true
+          git commit -m "Sync publish state [skip ci]" || true
+          git push origin main || true
