@@ -2,7 +2,7 @@ name: 2. Publish Viral Reel Pipeline
 
 on:
   schedule:
-    - cron: '0 10,16,22 * * *' # 3 cops al dia (10:00, 16:00, 22:00 UTC)
+    - cron: '0 10,16,20 * * *' # 3 cops al dia (12:00, 18:00, 22:00)
   workflow_dispatch:
 
 jobs:
