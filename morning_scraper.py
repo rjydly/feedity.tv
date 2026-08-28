@@ -45,7 +45,6 @@ def load_accounts():
     if not urls:
         return []
 
-    # Selecció ALEATÒRIA de 10 comptes (o menys si no n'hi ha 10)
     selected = random.sample(urls, min(NUM_RANDOM_ACCOUNTS, len(urls)))
     print(f"🎲 S'han seleccionat {len(selected)} comptes de forma aleatòria de {len(urls)} disponibles:")
     for u in selected:
@@ -116,7 +115,6 @@ def main():
     client = ApifyClient(APIFY_TOKEN)
     processed_ids = load_processed_ids()
 
-    # Data límit: fa 2 dies
     fa_dos_dies = datetime.now(timezone.utc) - timedelta(days=2)
 
     print(f"🔍 Executant Apify scraper per a {len(accounts_to_scrape)} comptes...")
@@ -129,7 +127,16 @@ def main():
 
     try:
         run = client.actor("apify/instagram-api-scraper").call(run_input=run_input)
-        items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
+        if not run:
+            print("❌ L'actor d'Apify ha fallat o ha retornat None.")
+            return
+
+        dataset_id = getattr(run, "default_dataset_id", None) or (run.get("defaultDatasetId") if isinstance(run, dict) else None)
+        if not dataset_id:
+            print("❌ No s'ha trobat dataset_id a la resposta d'Apify.")
+            return
+
+        items = list(client.dataset(dataset_id).iterate_items())
         print(f"✅ Apify ha retornat {len(items)} publicacions/reels.")
     except Exception as e:
         print(f"❌ Error durant la crida a Apify: {e}")
