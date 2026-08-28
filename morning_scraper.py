@@ -2,7 +2,6 @@ import os
 import csv
 import json
 import random
-from datetime import datetime, timezone, timedelta
 from apify_client import ApifyClient
 
 # --- CONFIGURACIÓ ---
@@ -88,7 +87,7 @@ def sync_candidates_to_backup_csv(candidates):
 
     added_count = 0
     for c in candidates:
-        link = c.get('url') or f"https://www.instagram.com/p/{c.get('code')}/"
+        link = c.get('url') or f"https://www.instagram.com/p/{c.get('code') or c.get('shortCode')}/"
         if link and link not in existing_links:
             likes = c.get('likesCount', 0)
             rows.append({
@@ -100,6 +99,21 @@ def sync_candidates_to_backup_csv(candidates):
 
     save_backup_csv(rows)
     print(f"📦 Sync amb {BACKUP_CSV}: Afegits {added_count} Reels nous al backup. Total al backup: {len(rows)}")
+
+
+def is_valid_video(item):
+    """Verifica si l'element d'Apify és un vídeo/reel."""
+    if item.get("isVideo") or item.get("videoUrl"):
+        return True
+    item_type = str(item.get("type") or "").lower()
+    if item_type in ["video", "reel"]:
+        return True
+    product_type = str(item.get("productType") or "").lower()
+    if product_type in ["clips", "feed"]:
+        return True
+    if item.get("videoViewCount") or item.get("videoPlayCount"):
+        return True
+    return False
 
 
 def main():
@@ -114,8 +128,6 @@ def main():
 
     client = ApifyClient(APIFY_TOKEN)
     processed_ids = load_processed_ids()
-
-    fa_dos_dies = datetime.now(timezone.utc) - timedelta(days=2)
 
     print(f"🔍 Executant Apify scraper per a {len(accounts_to_scrape)} comptes...")
 
@@ -144,33 +156,25 @@ def main():
 
     candidates = []
     for i in items:
-        is_video = i.get("videoUrl") or i.get("type") == "Video" or i.get("isVideo", False)
-        item_id = str(i.get("id") or i.get("shortCode") or "")
-        is_new_id = item_id and item_id not in processed_ids
+        if not is_valid_video(i):
+            continue
 
-        post_date_raw = i.get("timestamp") or i.get("takenAt")
-        is_recent = True
-        if post_date_raw:
-            try:
-                if isinstance(post_date_raw, (int, float)):
-                    post_date = datetime.fromtimestamp(post_date_raw, tz=timezone.utc)
-                else:
-                    post_date = datetime.fromisoformat(str(post_date_raw).replace("Z", "+00:00"))
-                if post_date < fa_dos_dies:
-                    is_recent = False
-            except Exception:
-                pass
+        item_id = str(i.get("id") or i.get("shortCode") or i.get("code") or "")
+        shortcode = i.get("shortCode") or i.get("code") or item_id
 
-        if is_video and is_new_id and is_recent:
-            candidates.append(i)
+        # Comprovar si ja s'ha processat anteriorment
+        if item_id in processed_ids or shortcode in processed_ids:
+            continue
 
-    print(f"📊 S'han trobat {len(candidates)} Reels candidats recents i no processats.")
+        candidates.append(i)
+
+    print(f"📊 S'han trobat {len(candidates)} Reels candidats nous (no processats anteriorment).")
 
     if not candidates:
-        print("ℹ️ No s'ha trobat cap Reel nou avui.")
+        print("ℹ️ No s'ha trobat cap Reel nou (tots els extrets ja s'havien processat anteriorment).")
         return
 
-    # 1. Sincronitzar TOTS els candidats al CSV de backup
+    # 1. Sincronitzar TOTS els candidats nous al CSV de backup
     sync_candidates_to_backup_csv(candidates)
 
     # 2. Ordenar els candidats per likes de MÉS a MENYS
@@ -179,8 +183,9 @@ def main():
     # 3. Agafar els 3 MILLORS Reels per a la cua d'avui
     today_top_3 = []
     for c in candidates[:3]:
-        link = c.get('url') or f"https://www.instagram.com/reel/{c.get('code')}/"
-        item_id = str(c.get("id") or c.get("shortCode") or "")
+        shortcode = c.get("shortCode") or c.get("code") or c.get("id")
+        link = c.get('url') or f"https://www.instagram.com/reel/{shortcode}/"
+        item_id = str(c.get("id") or shortcode or "")
         likes = c.get("likesCount", 0)
         today_top_3.append({
             "id": item_id,
