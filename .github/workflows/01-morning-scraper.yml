@@ -1,0 +1,48 @@
+name: 1. Morning Scraper & Curation
+
+on:
+  schedule:
+    - cron: '0 7 * * *' # Tots els dies a les 07:00 AM UTC
+  workflow_dispatch:
+
+jobs:
+  scrape-and-curate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          pip install requests apify-client
+
+      - name: Configure Git Identity
+        run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+
+      - name: Run Morning Scraper
+        env:
+          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+          APIFY_API_TOKEN: ${{ secrets.APIFY_TOKEN }}
+        run: python morning_scraper.py
+
+      - name: Sync Queue & Backup Files to Git
+        if: always()
+        run: |
+          git pull --rebase origin main || true
+          git add today_queue.json backup_reels.csv || true
+          git commit -m "Update daily queue & backup pool [skip ci]" || true
+          git push origin main || true
