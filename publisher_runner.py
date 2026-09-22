@@ -9,6 +9,8 @@ BACKUP_CSV = 'backup_reels.csv'
 SOURCES_CSV = 'sources.csv'
 DB_FILE = 'processed_videos.json'
 
+MAX_RETRIES = 5  # Nombre màxim d'intents consecutius si un enllaç falla
+
 
 def extract_shortcode(reel_url):
     match = re.search(r"instagram\.com/(?:reel|reels|p|tv)/([A-Za-z0-9_-]+)", reel_url)
@@ -79,8 +81,8 @@ def get_next_reel_url():
         print(f"🎯 [CUA D'AVUI] Seleccionat Reel: {item['url']} ({item.get('likes', 0)} likes)")
         return item['url']
 
-    # 2. Si la cua d'avui està buida, cercar el més viral a backup_reels.csv
-    print("🛡️ [BACKUP MODE] La cua d'avui està buida. Cercant a backup_reels.csv...")
+    # 2. Si la cua d'avui està buida, cercar a backup_reels.csv
+    print("🛡️ [BACKUP MODE] Cercant el següent Reel a backup_reels.csv...")
     rows = load_backup_csv()
     updated = False
     chosen_url = None
@@ -98,11 +100,9 @@ def get_next_reel_url():
                 updated = True
             continue
 
-        # Si està pendent (sense status) i no s'ha processat mai
+        # Si no té status (és a dir, no ha estat provat ni completat)
         if not r.get('status', '').strip() and not chosen_url:
             chosen_url = url
-            r['status'] = 'done'  # El marquem per no repetir-lo mai
-            updated = True
             print(f"🎯 [BACKUP] Seleccionat Reel: {url} ({r.get('likes', 0)} likes)")
             break
 
@@ -125,16 +125,48 @@ def set_sources_csv(reel_url):
     print(f"📝 sources.csv actualitzat amb: {reel_url} -> pending")
 
 
+def get_sources_csv_status(reel_url):
+    """Comprova si main.py ha marcat el vídeo com a 'done' o 'failed'."""
+    if not os.path.exists(SOURCES_CSV):
+        return ""
+    try:
+        with open(SOURCES_CSV, mode='r', newline='', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            header = next(reader, None)
+            for row in reader:
+                if row and len(row) >= 2 and row[0].strip() == reel_url.strip():
+                    return row[1].strip().lower()
+    except Exception:
+        return ""
+    return ""
+
+
 def main():
-    reel_url = get_next_reel_url()
-    if not reel_url:
-        print("❌ No hi ha cap vídeo per publicar en aquesta execució.")
-        return
+    print(f"🚀 Iniciant pipeline de publicació (fins a {MAX_RETRIES} intents si hi ha fallades)...")
 
-    set_sources_csv(reel_url)
+    for attempt in range(1, MAX_RETRIES + 1):
+        reel_url = get_next_reel_url()
+        if not reel_url:
+            print("❌ No queden més vídeos disponibles a la cua ni al backup.")
+            return
 
-    print("🎬 Executant main.py...")
-    subprocess.run(["python", "main.py"], check=True)
+        set_sources_csv(reel_url)
+
+        print(f"\n🎬 [Intent {attempt}/{MAX_RETRIES}] Executant main.py per a: {reel_url}...")
+        
+        # Executem main.py sense check=True per capturar si falla i poder passar al següent
+        subprocess.run(["python", "main.py"], check=False)
+
+        # Comprovem el resultat escrit per main.py a sources.csv
+        status = get_sources_csv_status(reel_url)
+        if status == "done":
+            print(f"\n🎉 Vídeo processat i publicat amb èxit a l'intent {attempt}!")
+            return
+        else:
+            print(f"\n⚠️ El reel {reel_url} ha fallat (estat: {status}).")
+            print("🔄 Activant fallback immediat: saltant automàticament al següent candidat...")
+
+    print(f"\n❌ S'han esgotat els {MAX_RETRIES} intents consecutius sense èxit.")
 
 
 if __name__ == "__main__":
