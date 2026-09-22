@@ -126,7 +126,6 @@ def update_csv_status(target_url, new_status="done"):
 # ==========================================
 
 def cleanup_videos_dir(keep_filenames=None):
-    """Elimina fitxers antics de la carpeta videos/."""
     os.makedirs(VIDEOS_DIR, exist_ok=True)
     keep_filenames = keep_filenames or []
     for f in os.listdir(VIDEOS_DIR):
@@ -140,7 +139,6 @@ def cleanup_videos_dir(keep_filenames=None):
 
 
 def push_media_to_github(video_rel_filename, thumbnail_rel_filename="final_thumbnail.jpg"):
-    """Sincronitza videos i metadades a GitHub abans de cridar Buffer."""
     if TEST_MODE:
         return True
 
@@ -148,7 +146,6 @@ def push_media_to_github(video_rel_filename, thumbnail_rel_filename="final_thumb
     try:
         cleanup_videos_dir(keep_filenames=[video_rel_filename, thumbnail_rel_filename])
 
-        # Pull previ per evitar conflictes si el runner ha tocat today_queue
         subprocess.run(["git", "pull", "--rebase", "origin", "main"], check=False)
 
         subprocess.run([
@@ -387,9 +384,12 @@ def extract_frame_as_image(video_path, timestamp=0.5):
     return None
 
 
-def image_to_base64_jpeg(image_pil):
+def image_to_base64_jpeg(image_pil, max_dim=1024):
+    """Redueix la imatge per no saturar tokens de Groq/Gemini i la converteix a Base64."""
+    img = image_pil.copy()
+    img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
     buffered = BytesIO()
-    image_pil.save(buffered, format="JPEG", quality=85)
+    img.save(buffered, format="JPEG", quality=80)
     return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
 
@@ -453,7 +453,7 @@ def parse_json_safely(raw_text):
 
 
 def analyze_with_gemini_vision(image_pil, caption_raw=""):
-    """Anàlisi principal amb Google Gemini (família Gemini 3 oficial)."""
+    """Anàlisi principal amb Google Gemini 3."""
     from google import genai
     from google.genai import types
     
@@ -466,7 +466,6 @@ def analyze_with_gemini_vision(image_pil, caption_raw=""):
     if caption_raw:
         contents.append(f"\nOriginal post description: {caption_raw}")
 
-    # Models de producció actuals segons documentació oficial
     candidate_models = [
         "gemini-3.8-flash",
         "gemini-3.7-flash",
@@ -496,12 +495,13 @@ def analyze_with_gemini_vision(image_pil, caption_raw=""):
                 )
         except Exception as e:
             print(f"ℹ️ Gemini error ({model_name}): {e}")
+            time.sleep(1)  # Pausa de seguretat en cas de pics 503
             continue
     return None
 
 
 def analyze_with_groq_vision(image_pil, caption_raw=""):
-    """Fallback amb Groq Vision (Qwen 3.8 27B multimodal i GPT-OSS 120B)."""
+    """Fallback amb Groq Cloud (amb control estricte d'OTPM i gestió de tipus)."""
     from groq import Groq
     client = Groq(api_key=GROQ_API_KEY)
 
@@ -509,44 +509,49 @@ def analyze_with_groq_vision(image_pil, caption_raw=""):
     if caption_raw:
         prompt += f"\nOriginal post description: {caption_raw}"
 
-    content = [{"type": "text", "text": prompt}]
+    # Contingut multimodal per a models amb suport de visió (qwen3.8-27b)
+    content_multimodal = [{"type": "text", "text": prompt}]
     if image_pil is not None:
-        b64 = image_to_base64_jpeg(image_pil)
-        content.append({
+        b64 = image_to_base64_jpeg(image_pil, max_dim=1024)
+        content_multimodal.append({
             "type": "image_url",
             "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
         })
 
+    # (Nom_del_model, suporta_visió)
     candidate_models = [
-        "qwen/qwen3.8-27b",
-        "openai/gpt-oss-120b"
+        ("qwen/qwen3.8-27b", True),          # Multimodal (visió + text)
+        ("openai/gpt-oss-120b", False),      # Text-only (requereix content com a string)
+        ("llama-3.3-70b-versatile", False)   # Text-only
     ]
 
-    for model_name in candidate_models:
+    for model_name, supports_vision in candidate_models:
         try:
             print(f"🧠 [Groq Fallback] Provant model {model_name}...")
-            try:
-                completion = client.chat.completions.create(
-                    model=model_name,
-                    messages=[{"role": "user", "content": content}],
-                    temperature=0.6,
-                    response_format={"type": "json_object"}
-                )
-            except Exception as model_err:
-                # Si un model no admet imatges (ex. només text), provem amb la descripció del post
-                if "image" in str(model_err).lower() or "multimodal" in str(model_err).lower():
-                    print(f"ℹ️ Model {model_name} no admet imatge directa, analitzant descripció de text...")
-                    completion = client.chat.completions.create(
-                        model=model_name,
-                        messages=[{"role": "user", "content": prompt}],
-                        temperature=0.6,
-                        response_format={"type": "json_object"}
-                    )
-                else:
-                    raise model_err
 
+            # Si el model no suporta visió, enviem el prompt com a string directe per evitar l'error 400
+            if supports_vision and image_pil is not None:
+                messages = [{"role": "user", "content": content_multimodal}]
+            else:
+                messages = [{"role": "user", "content": prompt}]
+
+            # max_completion_tokens=600 evita superar el límit de 1000 OTPM de Groq (error 429)
+            kwargs = {
+                "model": model_name,
+                "messages": messages,
+                "temperature": 0.6,
+                "max_completion_tokens": 600,
+                "response_format": {"type": "json_object"}
+            }
+
+            # Desactivem raonament a qwen per optimitzar el consum de tokens
+            if "qwen" in model_name:
+                kwargs["reasoning_effort"] = "none"
+
+            completion = client.chat.completions.create(**kwargs)
             raw_text = completion.choices[0].message.content
             data = parse_json_safely(raw_text)
+
             if data and data.get("tweet_text"):
                 return (
                     data.get("credits", ""),
@@ -598,7 +603,7 @@ def analyze_content_with_retry(image_pil, caption_raw="", reel_url="", max_retri
                 return res
 
         if attempt < max_retries:
-            print(f"⏳ Totes les APIs han fallat o estan saturades (ex. 503). Esperant {delay_seconds} segons...")
+            print(f"⏳ Totes les APIs han fallat o estan saturades. Esperant {delay_seconds} segons...")
             time.sleep(delay_seconds)
 
     print(f"❌ La IA no ha respost després de {max_retries} intents.")
@@ -707,7 +712,6 @@ def create_tweet_header_image(tweet_text, width=1080):
     img = Image.new("RGBA", (width, header_height), (0, 0, 0, 255))
     draw = ImageDraw.Draw(img)
 
-    # 1. Avatar Circular
     avatar_x = margin_x
     avatar_y = top_padding
 
@@ -724,12 +728,10 @@ def create_tweet_header_image(tweet_text, width=1080):
         draw.ellipse([avatar_x, avatar_y, avatar_x + avatar_size, avatar_y + avatar_size], fill=(22, 24, 28))
         draw.text((avatar_x + 32, avatar_y + 20), "F", font=name_font, fill=(245, 200, 30))
 
-    # 2. Nom i Username
     text_start_x = avatar_x + avatar_size + 24
     draw.text((text_start_x, avatar_y + 6), "Feedity", font=name_font, fill=(255, 255, 255))
     draw.text((text_start_x, avatar_y + 58), "@feedity.tv", font=handle_font, fill=(113, 118, 123))
 
-    # 3. Cos del Tweet
     text_y = avatar_y + avatar_size + 36
     space_w = dummy_draw.textbbox((0, 0), " ", font=body_font_regular)[2]
 
@@ -991,7 +993,7 @@ def process_video_canvas(input_path, tweet_text, thumbnail_img_np, output_path):
 
     main_video_composite = CompositeVideoClip([video_positioned, header_clip], size=(1080, 1920))
 
-    # Incrustar la miniatura com a primer fotograma (1 frame = 1/30 segons = 33 ms)
+    # Incrustar la portada com a primer fotograma (33 ms)
     cover_clip = ImageClip(thumbnail_img_np).with_duration(1.0 / 30.0)
     final_video = concatenate_videoclips([cover_clip, main_video_composite])
 
