@@ -1,4 +1,5 @@
 import os
+import re
 import csv
 import json
 import subprocess
@@ -6,6 +7,22 @@ import subprocess
 TODAY_QUEUE_FILE = 'today_queue.json'
 BACKUP_CSV = 'backup_reels.csv'
 SOURCES_CSV = 'sources.csv'
+DB_FILE = 'processed_videos.json'
+
+
+def extract_shortcode(reel_url):
+    match = re.search(r"instagram\.com/(?:reel|reels|p|tv)/([A-Za-z0-9_-]+)", reel_url)
+    return match.group(1) if match else reel_url.strip()
+
+
+def load_processed_ids():
+    if os.path.exists(DB_FILE):
+        try:
+            with open(DB_FILE, 'r', encoding='utf-8') as f:
+                return set(json.load(f))
+        except Exception:
+            return set()
+    return set()
 
 
 def load_today_queue():
@@ -34,25 +51,68 @@ def load_backup_csv():
     return rows
 
 
+def save_backup_csv(rows):
+    fieldnames = ['link', 'likes', 'status']
+    with open(BACKUP_CSV, mode='w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for r in rows:
+            writer.writerow(r)
+
+
 def get_next_reel_url():
-    """Tria la URL del proper Reel a publicar (de la cua d'avui o del backup)."""
+    """Tria la URL del proper Reel a publicar (cua d'avui o backup no processat)."""
+    processed_ids = load_processed_ids()
+
     # 1. Intentar agafar de la Cua d'Avui
     queue = load_today_queue()
-    if queue:
+    while queue:
         item = queue.pop(0)
         save_today_queue(queue)
+        item_id = str(item.get('id', ''))
+        shortcode = extract_shortcode(item.get('url', ''))
+
+        if item_id in processed_ids or shortcode in processed_ids:
+            print(f"⏩ Ometent {item['url']} de today_queue (ja processat anteriorment).")
+            continue
+
         print(f"🎯 [CUA D'AVUI] Seleccionat Reel: {item['url']} ({item.get('likes', 0)} likes)")
         return item['url']
 
-    # 2. Si la cua d'avui està buida, agafar el millor pendent de backup_reels.csv
-    print("🛡️ [BACKUP MODE] La cua d'avui està buida. Cercant el Reel més viral pendent a backup_reels.csv...")
+    # 2. Si la cua d'avui està buida, cercar el més viral a backup_reels.csv
+    print("🛡️ [BACKUP MODE] La cua d'avui està buida. Cercant a backup_reels.csv...")
     rows = load_backup_csv()
-    for r in rows:
-        if r.get('status', '') == '':
-            print(f"🎯 [BACKUP] Seleccionat Reel: {r['link']} ({r.get('likes', 0)} likes)")
-            return r['link']
+    updated = False
+    chosen_url = None
 
-    print("⚠️ No hi ha cap Reel disponible ni a today_queue.json ni a backup_reels.csv.")
+    for r in rows:
+        url = r.get('link', '').strip()
+        if not url:
+            continue
+        shortcode = extract_shortcode(url)
+
+        # Si ja s'ha processat en el passat, actualitzem el seu estat per netejar el CSV
+        if shortcode in processed_ids:
+            if r.get('status') != 'done':
+                r['status'] = 'done'
+                updated = True
+            continue
+
+        # Si està pendent (sense status) i no s'ha processat mai
+        if not r.get('status', '').strip() and not chosen_url:
+            chosen_url = url
+            r['status'] = 'done'  # El marquem per no repetir-lo mai
+            updated = True
+            print(f"🎯 [BACKUP] Seleccionat Reel: {url} ({r.get('likes', 0)} likes)")
+            break
+
+    if updated:
+        save_backup_csv(rows)
+
+    if chosen_url:
+        return chosen_url
+
+    print("⚠️ No hi ha cap Reel disponible pendent ni a today_queue.json ni a backup_reels.csv.")
     return None
 
 
@@ -73,7 +133,6 @@ def main():
 
     set_sources_csv(reel_url)
 
-    # Executa el teu script main.py (amb Gemini/Groq, Plus Jakarta Sans, Portada i Buffer)
     print("🎬 Executant main.py...")
     subprocess.run(["python", "main.py"], check=True)
 
