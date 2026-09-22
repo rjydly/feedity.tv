@@ -64,7 +64,7 @@ jobs:
       - name: Final Git Sync
         if: always()
         run: |
-          git pull --rebase origin main || true
           git add -A videos/ processed_videos.json sources.csv today_queue.json backup_reels.csv || true
           git commit -m "Sync publish state [skip ci]" || true
+          git pull --rebase origin main || true
           git push origin main || true
