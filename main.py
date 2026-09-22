@@ -19,7 +19,6 @@ from moviepy import VideoFileClip, CompositeVideoClip, ImageClip, concatenate_vi
 # CONFIGURACIÓ PRINCIPAL
 # ==========================================
 
-# Canvia manualment aquí entre True (mode proves) i False (mode producció)
 TEST_MODE = False
 
 # Secrets i credencials
@@ -46,47 +45,80 @@ DISCLAIMER_TEXT = "All rights belong to the respective owner. DM for credit or r
 # GESTIÓ D'HISTORIAL I CSV
 # ==========================================
 
+def extract_shortcode(reel_url):
+    match = re.search(r"instagram\.com/(?:reel|reels|p|tv)/([A-Za-z0-9_-]+)", reel_url)
+    return match.group(1) if match else reel_url.strip()
+
+
 def load_processed_ids():
     if os.path.exists("processed_videos.json"):
         try:
-            with open("processed_videos.json", "r") as f:
+            with open("processed_videos.json", "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
             return []
     return []
 
 
-def save_processed_id(video_id):
+def save_processed_id(video_id, shortcode=None):
     if TEST_MODE:
         print("ℹ️ TEST_MODE actiu: No es desa l'ID a processed_videos.json")
         return
     history = load_processed_ids()
-    if video_id not in history:
-        history.append(video_id)
-        with open("processed_videos.json", "w") as f:
+    changed = False
+    for vid in [video_id, shortcode]:
+        if vid and str(vid) not in history:
+            history.append(str(vid))
+            changed = True
+    if changed:
+        with open("processed_videos.json", "w", encoding="utf-8") as f:
             json.dump(history, f, indent=4)
 
 
 def update_csv_status(target_url, new_status="done"):
-    """Actualitza la columna status a sources.csv."""
-    if not os.path.exists("sources.csv") or TEST_MODE:
+    """Actualitza l'estat tant a sources.csv com a backup_reels.csv."""
+    if TEST_MODE:
         return
 
-    rows = []
-    with open("sources.csv", mode="r", newline="", encoding="utf-8") as f:
-        reader = csv.reader(f)
-        for row in reader:
-            if not row:
-                continue
-            if row[0].strip() == target_url.strip():
-                rows.append([row[0].strip(), new_status])
-            else:
-                rows.append(row)
+    target_shortcode = extract_shortcode(target_url)
 
-    with open("sources.csv", mode="w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerows(rows)
-    print(f"📝 sources.csv actualitzat: {target_url} -> {new_status}")
+    # 1. Actualitzar sources.csv
+    if os.path.exists("sources.csv"):
+        rows = []
+        with open("sources.csv", mode="r", newline="", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            for row in reader:
+                if not row:
+                    continue
+                if row[0].strip() == target_url.strip() or extract_shortcode(row[0].strip()) == target_shortcode:
+                    rows.append([row[0].strip(), new_status])
+                else:
+                    rows.append(row)
+
+        with open("sources.csv", mode="w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerows(rows)
+        print(f"📝 sources.csv actualitzat: {target_url} -> {new_status}")
+
+    # 2. Actualitzar backup_reels.csv
+    if os.path.exists("backup_reels.csv"):
+        backup_rows = []
+        updated_backup = False
+        with open("backup_reels.csv", mode="r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                link = row.get("link", "").strip()
+                if link == target_url.strip() or extract_shortcode(link) == target_shortcode:
+                    row["status"] = new_status
+                    updated_backup = True
+                backup_rows.append(row)
+
+        if updated_backup:
+            with open("backup_reels.csv", mode="w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=["link", "likes", "status"])
+                writer.writeheader()
+                writer.writerows(backup_rows)
+            print(f"📝 backup_reels.csv actualitzat: {target_url} -> {new_status}")
 
 
 # ==========================================
@@ -108,19 +140,29 @@ def cleanup_videos_dir(keep_filenames=None):
 
 
 def push_media_to_github(video_rel_filename, thumbnail_rel_filename="final_thumbnail.jpg"):
-    """Neteja videos antics, afegeix el nou i fa push a GitHub abans de cridar Buffer."""
+    """Sincronitza videos i metadades a GitHub abans de cridar Buffer."""
     if TEST_MODE:
         return True
 
-    print("📤 Netejant fitxers antics i fent push a GitHub...")
+    print("📤 Netejant fitxers antics i sincronitzant commit a GitHub...")
     try:
         cleanup_videos_dir(keep_filenames=[video_rel_filename, thumbnail_rel_filename])
 
-        # git add -A garanteix que els fitxers esborrats es registrin a Git
-        subprocess.run(["git", "add", "-A", VIDEOS_DIR, "processed_videos.json", "sources.csv"], check=False)
+        # Pull previ per evitar conflictes si el runner ha tocat today_queue
+        subprocess.run(["git", "pull", "--rebase", "origin", "main"], check=False)
+
+        subprocess.run([
+            "git", "add", "-A",
+            VIDEOS_DIR,
+            "processed_videos.json",
+            "sources.csv",
+            "today_queue.json",
+            "backup_reels.csv"
+        ], check=False)
+
         subprocess.run(["git", "commit", "-m", f"Publish {video_rel_filename} [skip ci]"], check=False)
         subprocess.run(["git", "push"], check=True)
-        print("✅ Carpeta videos/ sincronitzada a GitHub amb èxit!")
+        print("✅ Estat i carpeta videos/ sincronitzats a GitHub amb èxit!")
         time.sleep(3)
         return True
     except Exception as e:
@@ -133,7 +175,6 @@ def push_media_to_github(video_rel_filename, thumbnail_rel_filename="final_thumb
 # ==========================================
 
 def get_channel_service(channel_id, headers):
-    """Obté el servei del canal (instagram, facebook, tiktok) de manera unitària."""
     query = """
     query GetChannel($input: ChannelInput!) {
       channel(input: $input) {
@@ -159,7 +200,6 @@ def get_channel_service(channel_id, headers):
 
 
 def publish_to_buffer(caption_text, video_filename, thumbnail_offset_ms=0):
-    """Publica el vídeo des de la carpeta videos/ a tots els canals connectats a Buffer."""
     if not BUFFER_ACCESS_TOKEN or not BUFFER_CHANNEL_IDS or not GITHUB_REPOSITORY:
         print("⚠️ Dades de Buffer o GITHUB_REPOSITORY no configurades. S'omet la publicació.")
         return False
@@ -215,18 +255,9 @@ def publish_to_buffer(caption_text, video_filename, thumbnail_offset_ms=0):
         }
 
         if "instagram" in service:
-            post_input["metadata"] = {
-                "instagram": {
-                    "type": "reel",
-                    "shouldShareToFeed": True
-                }
-            }
+            post_input["metadata"] = {"instagram": {"type": "reel", "shouldShareToFeed": True}}
         elif "facebook" in service:
-            post_input["metadata"] = {
-                "facebook": {
-                    "type": "reel"
-                }
-            }
+            post_input["metadata"] = {"facebook": {"type": "reel"}}
 
         def send_request(inp):
             return requests.post(
@@ -245,14 +276,12 @@ def publish_to_buffer(caption_text, video_filename, thumbnail_offset_ms=0):
             error_msg = result.get("message") or ""
 
             if "Instagram posts require a type" in error_msg:
-                print("🔄 Reintentant com a Instagram Reel...")
                 post_input["metadata"] = {"instagram": {"type": "reel", "shouldShareToFeed": True}}
                 response = send_request(post_input)
                 res_data = response.json()
                 result = (res_data.get("data") or {}).get("createPost", {})
                 error_msg = result.get("message") or ""
             elif "Facebook posts require a type" in error_msg:
-                print("🔄 Reintentant com a Facebook Reel...")
                 post_input["metadata"] = {"facebook": {"type": "reel"}}
                 response = send_request(post_input)
                 res_data = response.json()
@@ -280,9 +309,7 @@ def publish_to_buffer(caption_text, video_filename, thumbnail_offset_ms=0):
 # ==========================================
 
 def ensure_fonts():
-    """Assegura que les fonts Plus Jakarta Sans estiguin disponibles a assets/fonts/."""
     os.makedirs(FONTS_DIR, exist_ok=True)
-    
     font_urls = {
         "PlusJakartaSans-Regular.ttf": "https://raw.githubusercontent.com/tokotype/PlusJakartaSans/master/fonts/ttf/PlusJakartaSans-Regular.ttf",
         "PlusJakartaSans-Bold.ttf": "https://raw.githubusercontent.com/tokotype/PlusJakartaSans/master/fonts/ttf/PlusJakartaSans-Bold.ttf",
@@ -329,7 +356,6 @@ def get_jakarta_font(style="regular", size=42):
 # ==========================================
 
 def clean_tweet_text(text):
-    """Elimina emojis i caràcters no renderitzables."""
     if not text:
         return ""
     emoji_pattern = re.compile(
@@ -417,7 +443,6 @@ def format_final_caption(generated_caption):
 
 
 def parse_json_safely(raw_text):
-    """Extreu i parseja JSON de manera robusta."""
     try:
         return json.loads(raw_text)
     except Exception:
@@ -428,7 +453,7 @@ def parse_json_safely(raw_text):
 
 
 def analyze_with_gemini_vision(image_pil, caption_raw=""):
-    """Anàlisi principal amb Google Gemini."""
+    """Anàlisi principal amb Google Gemini (família Gemini 3 oficial)."""
     from google import genai
     from google.genai import types
     
@@ -441,14 +466,25 @@ def analyze_with_gemini_vision(image_pil, caption_raw=""):
     if caption_raw:
         contents.append(f"\nOriginal post description: {caption_raw}")
 
-    candidate_models = ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-2.0-flash"]
+    # Models de producció actuals segons documentació oficial
+    candidate_models = [
+        "gemini-3.8-flash",
+        "gemini-3.7-flash",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash",
+        "gemini-3.5-flash-lite"
+    ]
+
     for model_name in candidate_models:
         try:
             print(f"🧠 [Gemini] Provant model {model_name}...")
             res = client.models.generate_content(
                 model=model_name,
                 contents=contents,
-                config=types.GenerateContentConfig(response_mime_type="application/json")
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.7
+                )
             )
             data = parse_json_safely(res.text)
             if data and data.get("tweet_text"):
@@ -465,7 +501,7 @@ def analyze_with_gemini_vision(image_pil, caption_raw=""):
 
 
 def analyze_with_groq_vision(image_pil, caption_raw=""):
-    """Fallback amb Groq Vision si Gemini falla o està saturat."""
+    """Fallback amb Groq Vision (Qwen 3.8 27B multimodal i GPT-OSS 120B)."""
     from groq import Groq
     client = Groq(api_key=GROQ_API_KEY)
 
@@ -482,18 +518,33 @@ def analyze_with_groq_vision(image_pil, caption_raw=""):
         })
 
     candidate_models = [
-        "qwen/qwen3.6-27b",
-        "meta-llama/llama-4-scout-17b-16e-instruct"
+        "qwen/qwen3.8-27b",
+        "openai/gpt-oss-120b"
     ]
 
     for model_name in candidate_models:
         try:
             print(f"🧠 [Groq Fallback] Provant model {model_name}...")
-            completion = client.chat.completions.create(
-                model=model_name,
-                messages=[{"role": "user", "content": content}],
-                temperature=0.6
-            )
+            try:
+                completion = client.chat.completions.create(
+                    model=model_name,
+                    messages=[{"role": "user", "content": content}],
+                    temperature=0.6,
+                    response_format={"type": "json_object"}
+                )
+            except Exception as model_err:
+                # Si un model no admet imatges (ex. només text), provem amb la descripció del post
+                if "image" in str(model_err).lower() or "multimodal" in str(model_err).lower():
+                    print(f"ℹ️ Model {model_name} no admet imatge directa, analitzant descripció de text...")
+                    completion = client.chat.completions.create(
+                        model=model_name,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.6,
+                        response_format={"type": "json_object"}
+                    )
+                else:
+                    raise model_err
+
             raw_text = completion.choices[0].message.content
             data = parse_json_safely(raw_text)
             if data and data.get("tweet_text"):
@@ -510,7 +561,6 @@ def analyze_with_groq_vision(image_pil, caption_raw=""):
 
 
 def send_telegram_alert(error_detail, reel_url=""):
-    """Envia una alerta immediata si les IAs no responen després dels 5 intents."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
     url_msg = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -548,7 +598,7 @@ def analyze_content_with_retry(image_pil, caption_raw="", reel_url="", max_retri
                 return res
 
         if attempt < max_retries:
-            print(f"⏳ Totes les APIs han fallat o estan saturades. Esperant {delay_seconds} segons...")
+            print(f"⏳ Totes les APIs han fallat o estan saturades (ex. 503). Esperant {delay_seconds} segons...")
             time.sleep(delay_seconds)
 
     print(f"❌ La IA no ha respost després de {max_retries} intents.")
@@ -794,11 +844,10 @@ def crop_content_bounding_box(clip, num_samples=6):
 
 
 # ==========================================
-# MINIATURA EDITORIAL (FONS NEGRE + BLUR DEL VÍDEO RETALLAT + LOGO 190PX)
+# MINIATURA EDITORIAL
 # ==========================================
 
 def create_editorial_thumbnail(video_path, thumbnail_title, output_path=os.path.join(VIDEOS_DIR, "final_thumbnail.jpg")):
-    """Genera la portada amb fons negre, el requadre del vídeo retallat i blurreat al mig, i el logo de 190px a la Safe Zone."""
     os.makedirs(VIDEOS_DIR, exist_ok=True)
     clip = VideoFileClip(video_path)
     frame_w, frame_h = clip.w, clip.h
@@ -810,7 +859,6 @@ def create_editorial_thumbnail(video_path, thumbnail_title, output_path=os.path.
 
     frame_pil = Image.fromarray(frame_np)
 
-    # 1. Aplicar el crop idèntic al del vídeo per eliminar capçaleres antigues
     min_area_ratio = 0.10
     if bbox and (bbox[2] * bbox[3]) >= min_area_ratio * frame_w * frame_h:
         x, y, w, h = bbox
@@ -824,10 +872,8 @@ def create_editorial_thumbnail(video_path, thumbnail_title, output_path=os.path.
     else:
         cropped_frame = frame_pil
 
-    # 2. Llenç base: Fons negre sòlid 1080x1920
     canvas = Image.new("RGBA", (1080, 1920), (0, 0, 0, 255))
 
-    # 3. Escalar el requadre del vídeo a 1080 d'amplada i aplicar el BLUR intens
     w_c, h_c = cropped_frame.size
     scale_fg = 1080 / w_c
     fg_w = 1080
@@ -836,17 +882,14 @@ def create_editorial_thumbnail(video_path, thumbnail_title, output_path=os.path.
     fg_resized = cropped_frame.resize((fg_w, fg_h), Image.Resampling.LANCZOS)
     fg_blurred = fg_resized.filter(ImageFilter.GaussianBlur(radius=32)).convert("RGBA")
 
-    # Filtre de contrast fosc sobre el bloc desenfocat
     dark_tint = Image.new("RGBA", (fg_w, fg_h), (0, 0, 0, 130))
     fg_box = Image.alpha_composite(fg_blurred, dark_tint)
 
-    # Centrar el requadre blurreat verticalment sobre el fons negre
     fg_y = max(0, (1920 - fg_h) // 2)
     canvas.paste(fg_box, (0, fg_y), fg_box)
 
     draw = ImageDraw.Draw(canvas)
 
-    # 4. Tipografia del titular i ajust de línies dins de 920px
     title_font = get_jakarta_font("bold", size=76)
     words = thumbnail_title.split()
     lines = []
@@ -867,15 +910,13 @@ def create_editorial_thumbnail(video_path, thumbnail_title, output_path=os.path.
     if current_line:
         lines.append(" ".join(current_line))
 
-    # 5. Centrat vertical exacte a y=960 (Safe Zone 1:1)
     line_h = 96
     total_title_h = len(lines) * line_h
-    logo_size = 190  # Logotip gegant
+    logo_size = 190
     gap = 46
     total_block_h = total_title_h + gap + logo_size
     start_y = 960 - (total_block_h // 2)
 
-    # Dibuixar titular en blanc amb ombra
     text_y = start_y
     for line in lines:
         w = draw.textbbox((0, 0), line, font=title_font)[2]
@@ -884,7 +925,6 @@ def create_editorial_thumbnail(video_path, thumbnail_title, output_path=os.path.
         draw.text((x, text_y), line, font=title_font, fill=(255, 255, 255))
         text_y += line_h
 
-    # 6. Dibuixar el Logotip gegant (190 px) a sota
     logo_x = (1080 - logo_size) // 2
     logo_y = start_y + total_title_h + gap
 
@@ -945,12 +985,10 @@ def process_video_canvas(input_path, tweet_text, thumbnail_img_np, output_path):
     header_h = header_img_np.shape[0]
 
     header_clip = ImageClip(header_img_np).with_duration(scaled_clip.duration)
-
     header_clip = header_clip.with_position(("center", 180))
     video_y_pos = 180 + header_h + 10
     video_positioned = scaled_clip.with_position(("center", video_y_pos))
 
-    # Vídeo principal compost
     main_video_composite = CompositeVideoClip([video_positioned, header_clip], size=(1080, 1920))
 
     # Incrustar la miniatura com a primer fotograma (1 frame = 1/30 segons = 33 ms)
@@ -988,7 +1026,6 @@ def send_telegram_notification(video_path, thumbnail_path, tweet_text, credits, 
 
     if TEST_MODE:
         print("🧪 [Mode Proves] Enviant vídeo, miniatura i caption per a revisió...")
-        
         video_caption = (
             f"🎬 <b>[TEST MODE] NOU VÍDEO PROCESSAT</b>\n\n"
             f"📌 <b>Tweet Text</b>:\n<i>{safe_tweet}</i>\n\n"
@@ -1024,11 +1061,6 @@ def send_telegram_notification(video_path, thumbnail_path, tweet_text, credits, 
 # ==========================================
 # FLUX PRINCIPAL
 # ==========================================
-
-def extract_shortcode(reel_url):
-    match = re.search(r"instagram\.com/(?:reel|reels|p|tv)/([A-Za-z0-9_-]+)", reel_url)
-    return match.group(1) if match else None
-
 
 def _cleanup_temp_input():
     for f in glob.glob("temp_input.*"):
@@ -1144,16 +1176,21 @@ def main():
             # 2. Composició de vídeo final dins de videos/
             process_video_canvas(video_file, tweet_text, thumbnail_np, unique_video_path)
 
-            # 3. Netejar fitxers antics de videos/ i fer PUSH a GitHub
+            # 3. Guardar IDs i estats en local ABANS de fer el push a GitHub
+            shortcode = extract_shortcode(reel_url)
+            save_processed_id(video_id, shortcode=shortcode)
+            update_csv_status(reel_url, "done")
+
+            # 4. Sincronitzar fitxers i fer PUSH a GitHub
             push_media_to_github(unique_video_rel, thumbnail_rel)
 
-            # 4. Publicació a xarxes socials via Buffer
+            # 5. Publicació a xarxes socials via Buffer
             if not TEST_MODE:
                 publish_to_buffer(generated_caption, video_filename=unique_video_rel, thumbnail_offset_ms=0)
             else:
                 print("🧪 [Mode Proves Actiu]: S'omet la crida a l'API de Buffer.")
 
-            # 5. Notificació a Telegram segons el mode
+            # 6. Notificació a Telegram segons el mode
             send_telegram_notification(
                 unique_video_path, 
                 thumbnail_file, 
@@ -1163,8 +1200,6 @@ def main():
                 video_id
             )
 
-            save_processed_id(video_id)
-            update_csv_status(reel_url, "done")
             print("✅ Procés finalitzat amb èxit!")
             break
         else:
