@@ -19,7 +19,7 @@ from moviepy import VideoFileClip, CompositeVideoClip, ImageClip, concatenate_vi
 # CONFIGURACIÓ PRINCIPAL
 # ==========================================
 
-TEST_MODE = False
+TEST_MODE = True
 
 # Secrets i credencials
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -752,8 +752,124 @@ def create_tweet_header_image(tweet_text, width=1080):
 
 
 # ==========================================
-# DETECCIÓ I CROP INTEL·LIGENT DE CONTINGUT
+# DETECCIÓ I CROP INTEL·LIGENT DE CONTINGUT (v2: basat en MOVIMENT)
 # ==========================================
+#
+# Idea: el que volem aïllar és la zona on els píxels CANVIEN amb el temps.
+# Capçaleres de text, logos, targetes de "quote tweet" i marcs són ESTÀTICS.
+# Un vídeo fosc sobre fons negre continua canviant, encara que el seu color
+# sigui gairebé igual que el del fons (el cas que fallava amb el mètode de color).
+
+CROP_ANALYSIS_WIDTH = 360        # amplada de treball (acceleració)
+CROP_PAIR_GAP_S = 0.25           # separació entre els dos fotogrames de cada parell
+CROP_NUM_PAIRS = 10              # parells de fotogrames analitzats
+CROP_DIFF_THRESHOLD = 2.5        # canvi mínim (0-255) sobre diferència suavitzada per considerar "moviment"
+CROP_ACTIVITY_RATIO = 0.25       # % de parells en què un píxel ha de canviar
+CROP_MIN_HEIGHT_RATIO = 0.18     # el vídeo ha d'ocupar >=18% de l'alçada del fotograma
+CROP_MIN_AREA_RATIO = 0.12
+CROP_MIN_FILL_RATIO = 0.35       # % de la caixa que ha de tenir moviment real
+CROP_ASPECT_RANGE = (0.5, 2.6)   # amplada/alçada admissible (9:16 ... 2.39:1)
+CROP_INNER_MARGIN = 0.006        # marge cap a DINS (elimina vores del marc / logos)
+
+
+def _sample_frame_pairs(clip, num_pairs=CROP_NUM_PAIRS, gap=CROP_PAIR_GAP_S):
+    duration = clip.duration or 0
+    if duration <= 0.3:
+        return []
+    gap = min(gap, duration / 3)
+    t_max = max(duration - gap - 0.05, 0.1)
+    times = np.linspace(0.1, t_max, num=num_pairs)
+    pairs = []
+    for t in times:
+        try:
+            a = clip.get_frame(float(t))
+            b = clip.get_frame(float(min(t + gap, duration - 0.02)))
+            pairs.append((a, b))
+        except Exception:
+            continue
+    return pairs
+
+
+def _downscale(frame, target_w=CROP_ANALYSIS_WIDTH):
+    h, w = frame.shape[:2]
+    scale = target_w / float(w)
+    small = cv2.resize(frame, (target_w, max(1, int(h * scale))), interpolation=cv2.INTER_AREA)
+    return small, scale
+
+
+def _validate_box(box, frame_w, frame_h):
+    """Rebutja caixes absurdes (línies fines, caixes massa petites o amb forma estranya)."""
+    if box is None:
+        return False
+    x, y, w, h = box
+    if w <= 0 or h <= 0:
+        return False
+    if h < CROP_MIN_HEIGHT_RATIO * frame_h:
+        return False
+    if (w * h) < CROP_MIN_AREA_RATIO * frame_w * frame_h:
+        return False
+    ar = w / float(h)
+    if not (CROP_ASPECT_RANGE[0] <= ar <= CROP_ASPECT_RANGE[1]):
+        return False
+    return True
+
+
+def find_video_box_by_motion(pairs, frame_w, frame_h):
+    """Retorna (x, y, w, h) en coordenades del fotograma original, o None."""
+    if len(pairs) < 3:
+        return None
+
+    activity = None
+    scale = 1.0
+    for a, b in pairs:
+        sa, scale = _downscale(a)
+        sb, _ = _downscale(b)
+        diff = np.max(np.abs(sa.astype(np.int16) - sb.astype(np.int16)), axis=2).astype(np.uint8)
+        diff = cv2.GaussianBlur(diff, (5, 5), 0)
+        # Llindar adaptatiu: estima el soroll de compressió de les zones estàtiques
+        noise_floor = float(np.percentile(diff, 25))
+        thr = max(CROP_DIFF_THRESHOLD, noise_floor * 2.0 + 1.5)
+        moving = (diff > thr).astype(np.float32)
+        activity = moving if activity is None else activity + moving
+    activity /= len(pairs)
+
+    mask = (activity >= CROP_ACTIVITY_RATIO).astype(np.uint8)
+
+    # Omple forats (zones estàtiques dins del vídeo) i elimina soroll aïllat
+    k_close = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 25))
+    k_open = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    # Marge de zeros: sense això, el CLOSE d'OpenCV estén la màscara fins a la vora
+    pad = 25
+    mask = cv2.copyMakeBorder(mask, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k_open)
+    mask = mask[pad:-pad, pad:-pad]
+
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    if n <= 1:
+        return None
+    best = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    x, y, w, h, _area = stats[best]
+
+    # Refinament per projecció: descarta files/columnes gairebé buides a les vores
+    comp = (labels[y:y + h, x:x + w] == best)
+    row_frac = comp.mean(axis=1)
+    col_frac = comp.mean(axis=0)
+    rows = np.where(row_frac >= 0.5)[0]
+    cols = np.where(col_frac >= 0.5)[0]
+    if len(rows) == 0 or len(cols) == 0:
+        return None
+    y1, y2 = y + rows[0], y + rows[-1] + 1
+    x1, x2 = x + cols[0], x + cols[-1] + 1
+
+    fill = mask[y1:y2, x1:x2].mean()
+    if fill < CROP_MIN_FILL_RATIO:
+        return None
+
+    inv = 1.0 / scale
+    box = (int(x1 * inv), int(y1 * inv), int((x2 - x1) * inv), int((y2 - y1) * inv))
+    return box if _validate_box(box, frame_w, frame_h) else None
+
 
 def detect_background_color(frame):
     h, w, _ = frame.shape
@@ -764,85 +880,92 @@ def detect_background_color(frame):
 
 
 def get_longest_consecutive_run(bool_array):
-    max_run = 0
-    current_run = 0
-    for val in bool_array:
-        if val:
-            current_run += 1
-            if current_run > max_run:
-                max_run = current_run
-        else:
-            current_run = 0
-    return max_run
+    # Versió vectoritzada (abans era un bucle Python píxel a píxel)
+    a = np.concatenate(([0], bool_array.astype(np.int8), [0]))
+    d = np.diff(a)
+    starts = np.where(d == 1)[0]
+    ends = np.where(d == -1)[0]
+    return int((ends - starts).max()) if len(starts) else 0
 
 
 def find_video_box_in_frame(frame, color_diff_threshold=30, min_width_ratio=0.65, min_height_ratio=0.65):
+    """Mètode antic basat en color (només com a fallback)."""
     h, w, _ = frame.shape
     bg_color = detect_background_color(frame)
-
     diff = np.max(np.abs(frame.astype(np.float32) - bg_color), axis=2)
     foreground_mask = diff > color_diff_threshold
 
     min_continuous_px = int(w * min_width_ratio)
-    valid_y = []
-
-    for y in range(h):
-        row = foreground_mask[y, :]
-        if get_longest_consecutive_run(row) >= min_continuous_px:
-            valid_y.append(y)
-
+    valid_y = [y for y in range(h) if get_longest_consecutive_run(foreground_mask[y, :]) >= min_continuous_px]
     if not valid_y:
         return None
-
-    y1 = valid_y[0]
-    y2 = valid_y[-1]
-
+    y1, y2 = valid_y[0], valid_y[-1]
     if (y2 - y1) < 100:
         return None
 
-    video_region_mask = foreground_mask[y1:y2, :]
-    region_h = y2 - y1
-    min_col_pixels = int(region_h * min_height_ratio)
-
-    valid_x = []
-    for x in range(w):
-        col = video_region_mask[:, x]
-        if np.sum(col) >= min_col_pixels:
-            valid_x.append(x)
-
-    if not valid_x:
-        x1, x2 = 0, w
-    else:
-        x1 = valid_x[0]
-        x2 = valid_x[-1]
-
+    region = foreground_mask[y1:y2, :]
+    min_col_pixels = int((y2 - y1) * min_height_ratio)
+    valid_x = [x for x in range(w) if np.sum(region[:, x]) >= min_col_pixels]
+    x1, x2 = (valid_x[0], valid_x[-1]) if valid_x else (0, w)
     return (x1, y1, max(1, x2 - x1), max(1, y2 - y1))
 
 
 def crop_content_bounding_box(clip, num_samples=6):
+    """Fallback per color: mediana de diversos fotogrames."""
     duration = clip.duration
     if not duration or duration <= 0:
         return None
-
     timestamps = np.linspace(0.5, max(duration - 0.5, 0.5), num=num_samples)
     boxes = []
-
     for t in timestamps:
         try:
-            frame = clip.get_frame(t)
-            box = find_video_box_in_frame(frame)
+            box = find_video_box_in_frame(clip.get_frame(t))
             if box:
                 boxes.append(box)
         except Exception:
             continue
-
     if not boxes:
         return None
-
-    boxes = np.array(boxes)
-    median_box = np.median(boxes, axis=0).astype(int)
-    x, y, w, h = median_box
+    x, y, w, h = np.median(np.array(boxes), axis=0).astype(int)
     return (int(x), int(y), int(w), int(h))
+
+
+def compute_safe_crop(clip):
+    """
+    Retorna (x1, y1, x2, y2) per retallar, o None si és millor NO retallar.
+    Cadena: moviment -> color (validat) -> cap retall.
+    S'usa tant per al vídeo com per a la miniatura perquè coincideixin.
+    """
+    frame_w, frame_h = clip.w, clip.h
+
+    method = "moviment"
+    box = None
+    try:
+        box = find_video_box_by_motion(_sample_frame_pairs(clip), frame_w, frame_h)
+    except Exception as e:
+        print(f"⚠️ Detecció per moviment ha fallat: {e}")
+
+    if box is None:
+        method = "color"
+        try:
+            cand = crop_content_bounding_box(clip)
+        except Exception:
+            cand = None
+        box = cand if _validate_box(cand, frame_w, frame_h) else None
+
+    if box is None:
+        print("ℹ️ Cap caixa fiable detectada: no es retalla.")
+        return None
+
+    x, y, w, h = box
+    mx, my = int(w * CROP_INNER_MARGIN), int(h * CROP_INNER_MARGIN)   # marge cap a DINS
+    x1, y1 = max(0, x + mx), max(0, y + my)
+    x2, y2 = min(frame_w, x + w - mx), min(frame_h, y + h - my)
+    # Mides parelles (libx264 / yuv420p)
+    x1, y1 = x1 - (x1 % 2), y1 - (y1 % 2)
+    x2, y2 = x2 - (x2 % 2), y2 - (y2 % 2)
+    print(f"✂️ Crop ({method}): x1={x1}, y1={y1}, x2={x2}, y2={y2}")
+    return (x1, y1, x2, y2)
 
 
 # ==========================================
@@ -853,26 +976,14 @@ def create_editorial_thumbnail(video_path, thumbnail_title, output_path=os.path.
     os.makedirs(VIDEOS_DIR, exist_ok=True)
     clip = VideoFileClip(video_path)
     frame_w, frame_h = clip.w, clip.h
-    bbox = crop_content_bounding_box(clip)
+    crop_box = compute_safe_crop(clip)
 
     t_sample = min(1.0, max(clip.duration - 0.1, 0.5)) if clip.duration else 0.5
     frame_np = clip.get_frame(t_sample)
     clip.close()
 
     frame_pil = Image.fromarray(frame_np)
-
-    min_area_ratio = 0.10
-    if bbox and (bbox[2] * bbox[3]) >= min_area_ratio * frame_w * frame_h:
-        x, y, w, h = bbox
-        margin_x = int(w * 0.01)
-        margin_y = int(h * 0.01)
-        x1 = max(0, x - margin_x)
-        y1 = max(0, y - margin_y)
-        x2 = min(frame_w, x + w + margin_x)
-        y2 = min(frame_h, y + h + margin_y)
-        cropped_frame = frame_pil.crop((x1, y1, x2, y2))
-    else:
-        cropped_frame = frame_pil
+    cropped_frame = frame_pil.crop(crop_box) if crop_box else frame_pil
 
     canvas = Image.new("RGBA", (1080, 1920), (0, 0, 0, 255))
 
@@ -963,21 +1074,11 @@ def process_video_canvas(input_path, tweet_text, thumbnail_img_np, output_path):
     os.makedirs(VIDEOS_DIR, exist_ok=True)
     clip = VideoFileClip(input_path)
     frame_w, frame_h = clip.w, clip.h
-    bbox = crop_content_bounding_box(clip)
-
-    min_area_ratio = 0.10
-    if bbox and (bbox[2] * bbox[3]) >= min_area_ratio * frame_w * frame_h:
-        x, y, w, h = bbox
-        margin_x = int(w * 0.01)
-        margin_y = int(h * 0.01)
-        x1 = max(0, x - margin_x)
-        y1 = max(0, y - margin_y)
-        x2 = min(frame_w, x + w + margin_x)
-        y2 = min(frame_h, y + h + margin_y)
-        print(f"✂️ Crop aplicat: x={x1}, y={y1}, x2={x2}, y2={y2}")
+    crop_box = compute_safe_crop(clip)
+    if crop_box:
+        x1, y1, x2, y2 = crop_box
         cropped_clip = clip.cropped(x1=x1, y1=y1, x2=x2, y2=y2)
     else:
-        print("ℹ️ No s'ha detectat cap marc distintiu, s'utilitza el vídeo original.")
         cropped_clip = clip
 
     scaled_clip = cropped_clip.resized(width=1080)
