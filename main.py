@@ -19,7 +19,7 @@ from moviepy import VideoFileClip, CompositeVideoClip, ImageClip, concatenate_vi
 # CONFIGURACIÓ PRINCIPAL
 # ==========================================
 
-TEST_MODE = False
+TEST_MODE = True
 
 # Secrets i credencials
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -761,15 +761,29 @@ def create_tweet_header_image(tweet_text, width=1080):
 # sigui gairebé igual que el del fons (el cas que fallava amb el mètode de color).
 
 CROP_ANALYSIS_WIDTH = 360        # amplada de treball (acceleració)
-CROP_PAIR_GAP_S = 0.25           # separació entre els dos fotogrames de cada parell
-CROP_NUM_PAIRS = 10              # parells de fotogrames analitzats
+CROP_PAIR_GAP_S = 0.5            # separació entre els dos fotogrames de cada parell
+CROP_NUM_PAIRS = 12              # parells de fotogrames analitzats
 CROP_DIFF_THRESHOLD = 2.5        # canvi mínim (0-255) sobre diferència suavitzada per considerar "moviment"
-CROP_ACTIVITY_RATIO = 0.25       # % de parells en què un píxel ha de canviar
+CROP_ACTIVITY_RATIO = 0.20       # % de parells en què un píxel ha de canviar
 CROP_MIN_HEIGHT_RATIO = 0.18     # el vídeo ha d'ocupar >=18% de l'alçada del fotograma
 CROP_MIN_AREA_RATIO = 0.12
 CROP_MIN_FILL_RATIO = 0.35       # % de la caixa que ha de tenir moviment real
 CROP_ASPECT_RANGE = (0.5, 2.6)   # amplada/alçada admissible (9:16 ... 2.39:1)
 CROP_INNER_MARGIN = 0.006        # marge cap a DINS (elimina vores del marc / logos)
+
+# Fase 2: expansió de la llavor fins a la vora real del vídeo
+CROP_SEED_MIN_AREA_RATIO = 0.015   # la llavor (zona amb moviment) pot ser petita
+CROP_EDGE_STEP_MIN = 10            # salt mínim de brillantor (0-255) per considerar una vora
+CROP_EDGE_COL_CONSISTENCY = 0.80   # % d'columnes (o files) on el salt ha de ser coherent
+CROP_EDGE_FLAT_ROWS = 8            # files planes que han de seguir DESPRÉS de la vora
+CROP_EDGE_FLAT_STD = 6.0           # desviació màxima dins d'una fila "plana"
+CROP_EDGE_TEXTURE_STD = 6.0        # textura mínima de l'interior per al criteri B
+CROP_EDGE_MOTION_AT_EDGE = 0.30    # fracció de moviment just a dins de la vora (criteri B)
+CROP_EDGE_MIN_FLAT_RUN = 0.06      # la zona plana exterior ha de fer >= 6% de la mida del fotograma
+                                   # (o arribar fins a la vora del fotograma). Distingeix el marge
+                                   # del vídeo d'una simple paret plana DINS del vídeo.
+CROP_EDGE_MAX_GROW_X = 0.5         # màx. creixement horitzontal per costat (% de l'AMPLADA del fotograma)
+CROP_EDGE_MAX_GROW_Y = 0.35        # màx. creixement vertical per costat (% de l'ALÇADA del fotograma)
 
 
 def _sample_frame_pairs(clip, num_pairs=CROP_NUM_PAIRS, gap=CROP_PAIR_GAP_S):
@@ -814,10 +828,10 @@ def _validate_box(box, frame_w, frame_h):
     return True
 
 
-def find_video_box_by_motion(pairs, frame_w, frame_h):
-    """Retorna (x, y, w, h) en coordenades del fotograma original, o None."""
+def find_motion_seed(pairs, frame_w, frame_h):
+    """LLAVOR: regió amb moviment. Retorna (x, y, w, h) en coordenades originals, o None."""
     if len(pairs) < 3:
-        return None
+        return None, None
 
     activity = None
     scale = 1.0
@@ -834,6 +848,7 @@ def find_video_box_by_motion(pairs, frame_w, frame_h):
     activity /= len(pairs)
 
     mask = (activity >= CROP_ACTIVITY_RATIO).astype(np.uint8)
+    raw_mask = mask.copy()          # màscara sense netejar: es reutilitza a la fase 2
 
     # Omple forats (zones estàtiques dins del vídeo) i elimina soroll aïllat
     k_close = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 25))
@@ -847,7 +862,7 @@ def find_video_box_by_motion(pairs, frame_w, frame_h):
 
     n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
     if n <= 1:
-        return None
+        return None, None
     best = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
     x, y, w, h, _area = stats[best]
 
@@ -855,20 +870,124 @@ def find_video_box_by_motion(pairs, frame_w, frame_h):
     comp = (labels[y:y + h, x:x + w] == best)
     row_frac = comp.mean(axis=1)
     col_frac = comp.mean(axis=0)
-    rows = np.where(row_frac >= 0.5)[0]
-    cols = np.where(col_frac >= 0.5)[0]
+    rows = np.where(row_frac >= 0.2)[0]
+    cols = np.where(col_frac >= 0.2)[0]
     if len(rows) == 0 or len(cols) == 0:
-        return None
+        return None, None
     y1, y2 = y + rows[0], y + rows[-1] + 1
     x1, x2 = x + cols[0], x + cols[-1] + 1
 
     fill = mask[y1:y2, x1:x2].mean()
     if fill < CROP_MIN_FILL_RATIO:
-        return None
+        return None, None
 
     inv = 1.0 / scale
     box = (int(x1 * inv), int(y1 * inv), int((x2 - x1) * inv), int((y2 - y1) * inv))
-    return box if _validate_box(box, frame_w, frame_h) else None
+    if box[2] * box[3] < CROP_SEED_MIN_AREA_RATIO * frame_w * frame_h:
+        return None, None
+    return box, raw_mask
+
+
+# ------------------------------------------------------------------
+# FASE 2: de la llavor a la vora real (basada en l'estructura ESTÀTICA)
+# ------------------------------------------------------------------
+
+def _median_gray(pairs):
+    """Fons estàtic: mediana temporal (en gris) dels fotogrames mostrejats. Elimina el que es mou."""
+    grays = [cv2.cvtColor(a, cv2.COLOR_RGB2GRAY) for a, _ in pairs]
+    return np.median(np.stack(grays, axis=0), axis=0).astype(np.float32)
+
+
+def _find_edge_outward(a, band_lo, band_hi, start, max_grow, fallback=None, motion=None):
+    """
+    Camina cap a files DECREIXENTS des de `start` (dins del vídeo) buscant la vora real.
+    Una vora és un salt de brillantor coherent en tota l'amplada de la banda, seguit
+    d'unes quantes files planes (el marc/fons exterior). Retorna el nou índex de la
+    primera fila del vídeo, o `start` si no es troba cap vora fiable.
+    """
+    fallback = start if fallback is None else fallback
+    lo = max(1, start - max_grow)
+    flat_n = CROP_EDGE_FLAT_ROWS
+    band = a[:, band_lo:band_hi]
+    mband = motion[:, band_lo:band_hi] if motion is not None else None
+    row_std_all = band.std(axis=1)
+    min_run = int(a.shape[0] * CROP_EDGE_MIN_FLAT_RUN)
+    for y in range(start, lo - 1, -1):
+        inner = band[y:y + 2].mean(axis=0)                 # 2 files cap a dins
+        outer = band[max(0, y - 2):y].mean(axis=0) if y >= 1 else None
+        if outer is None:
+            return fallback
+        # Primer: l'exterior ha de ser una zona PLANA (marc/fons) o la vora del fotograma
+        beyond = band[max(0, y - flat_n):y]
+        if beyond.shape[0] < flat_n and y - flat_n > 0:
+            continue
+        if beyond.shape[0] >= 3:
+            row_std = beyond.std(axis=1)
+            row_mean = beyond.mean(axis=1)
+            if row_std.max() > CROP_EDGE_FLAT_STD or (row_mean.max() - row_mean.min()) > CROP_EDGE_FLAT_STD:
+                continue
+
+        # Criteri A: salt de brillantor coherent en tota la banda (p. ex. gris -> negre)
+        d = outer - inner
+        med = float(np.median(d))
+        step_edge = False
+        if abs(med) >= CROP_EDGE_STEP_MIN:
+            consistent = np.mean((np.sign(d) == np.sign(med)) & (np.abs(d) >= CROP_EDGE_STEP_MIN / 2))
+            step_edge = consistent >= CROP_EDGE_COL_CONSISTENCY
+
+        # Criteri B: de contingut amb TEXTURA a zona plana (vídeo -> targeta/fons de color semblant)
+        # Només val si el MOVIMENT arriba fins a la vora (un vídeo que acaba contra una targeta),
+        # i no si és una simple textura estàtica (anella, text...) sobre una paret plana.
+        texture_edge = (
+            float(band[y:y + 4].std(axis=1).mean()) >= CROP_EDGE_TEXTURE_STD
+            and mband is not None
+            and float(mband[y:y + 4].mean()) >= CROP_EDGE_MOTION_AT_EDGE
+        )
+
+        if step_edge or texture_edge:
+            # Longitud de la zona plana exterior: un marge real és llarg o arriba a la vora
+            k, run = y - 1, 0
+            while k >= 0 and row_std_all[k] < CROP_EDGE_FLAT_STD:
+                run += 1
+                k -= 1
+            if k < 0 or run >= min_run:
+                return y
+    return fallback
+
+
+def refine_box_to_edges(median_gray, seed, motion_mask=None):
+    """Expandeix la llavor (x, y, w, h) a cada costat fins a la vora real del vídeo."""
+    H, W = median_gray.shape
+    x, y, w, h = seed
+    x1, y1, x2, y2 = x, y, x + w, y + h
+    gx = int(W * CROP_EDGE_MAX_GROW_X)
+    gy = int(H * CROP_EDGE_MAX_GROW_Y)
+
+    motion = None
+    if motion_mask is not None:
+        motion = cv2.resize(motion_mask.astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST).astype(np.float32)
+
+    def inset(size):
+        # La llavor pot sobresortir uns px per FORA de la vora real (efecte del tancament
+        # morfològic): comencem a buscar una mica per DINS perquè no se'ns escapi la vora.
+        return max(8, int(size * 0.04))
+
+    g, mo = median_gray, motion
+    for _ in range(2):  # 2 passades: els costats s'ajuden mútuament a definir la banda de mesura
+        ix, iy = inset(x2 - x1), inset(y2 - y1)
+        # TOP
+        y1 = _find_edge_outward(g, x1, x2, y1 + iy, gy + iy, fallback=y1, motion=mo)
+        # BOTTOM (girem verticalment: l'exterior passa a ser files decreixents)
+        y2 = H - _find_edge_outward(g[::-1], x1, x2, H - y2 + iy, gy + iy, fallback=H - y2,
+                                    motion=None if mo is None else mo[::-1])
+        # LEFT (transposem)
+        x1 = _find_edge_outward(g.T, y1, y2, x1 + ix, gx + ix, fallback=x1,
+                                motion=None if mo is None else mo.T)
+        # RIGHT
+        x2 = W - _find_edge_outward(g.T[::-1], y1, y2, W - x2 + ix, gx + ix, fallback=W - x2,
+                                    motion=None if mo is None else mo.T[::-1])
+
+    return (int(x1), int(y1), int(x2 - x1), int(y2 - y1))
 
 
 def detect_background_color(frame):
@@ -933,25 +1052,34 @@ def crop_content_bounding_box(clip, num_samples=6):
 def compute_safe_crop(clip):
     """
     Retorna (x1, y1, x2, y2) per retallar, o None si és millor NO retallar.
-    Cadena: moviment -> color (validat) -> cap retall.
+    Cadena: llavor per moviment + expansió a la vora real -> llavor sola (validada)
+            -> color (validat) -> cap retall.
     S'usa tant per al vídeo com per a la miniatura perquè coincideixin.
     """
     frame_w, frame_h = clip.w, clip.h
 
-    method = "moviment"
+    method = None
     box = None
     try:
-        box = find_video_box_by_motion(_sample_frame_pairs(clip), frame_w, frame_h)
+        pairs = _sample_frame_pairs(clip)
+        seed, raw_mask = find_motion_seed(pairs, frame_w, frame_h)
+        if seed is not None:
+            refined = refine_box_to_edges(_median_gray(pairs), seed, raw_mask)
+            if _validate_box(refined, frame_w, frame_h):
+                box, method = refined, "moviment+vora"
+            elif _validate_box(seed, frame_w, frame_h):
+                box, method = seed, "moviment"
+            print(f"🔎 Llavor={seed} -> refinada={refined}")
     except Exception as e:
         print(f"⚠️ Detecció per moviment ha fallat: {e}")
 
     if box is None:
-        method = "color"
         try:
             cand = crop_content_bounding_box(clip)
         except Exception:
             cand = None
-        box = cand if _validate_box(cand, frame_w, frame_h) else None
+        if _validate_box(cand, frame_w, frame_h):
+            box, method = cand, "color"
 
     if box is None:
         print("ℹ️ Cap caixa fiable detectada: no es retalla.")
