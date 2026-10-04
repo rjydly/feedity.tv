@@ -1,4 +1,5 @@
 import os
+import re
 import csv
 import json
 import random
@@ -14,6 +15,22 @@ DB_FILE = 'processed_videos.json'
 
 REELS_PER_ACCOUNT = 5
 NUM_RANDOM_ACCOUNTS = 10
+
+
+def extract_shortcode(url):
+    """Mateixa lògica que publisher_runner: /p/X/, /reel/X/, /reels/X/, /tv/X/ -> X."""
+    match = re.search(r"instagram\.com/(?:reel|reels|p|tv)/([A-Za-z0-9_-]+)", url or "")
+    return match.group(1) if match else (url or "").strip()
+
+
+def load_blocked_shortcodes():
+    """Shortcodes que ja han estat publicats ('done') o han fallat ('failed') a backup_reels.csv.
+    No s'han de tornar a encuar encara que continuïn entre els últims posts del compte."""
+    blocked = set()
+    for r in load_backup_csv():
+        if str(r.get('status', '')).strip().lower() in ('done', 'failed'):
+            blocked.add(extract_shortcode(r.get('link', '')))
+    return blocked
 
 
 def load_processed_ids():
@@ -83,18 +100,20 @@ def save_backup_csv(rows):
 def sync_candidates_to_backup_csv(candidates):
     """Afegeix els candidats nous trobats per Apify al CSV de backup."""
     rows = load_backup_csv()
-    existing_links = {r['link'] for r in rows}
+    existing_codes = {extract_shortcode(r['link']) for r in rows}
 
     added_count = 0
     for c in candidates:
         link = c.get('url') or f"https://www.instagram.com/p/{c.get('code') or c.get('shortCode')}/"
-        if link and link not in existing_links:
+        code = extract_shortcode(link)
+        if link and code not in existing_codes:
             likes = c.get('likesCount', 0)
             rows.append({
                 'link': link,
                 'likes': likes,
                 'status': ''  # Pendent
             })
+            existing_codes.add(code)
             added_count += 1
 
     save_backup_csv(rows)
@@ -102,14 +121,28 @@ def sync_candidates_to_backup_csv(candidates):
 
 
 def is_valid_video(item):
-    """Verifica si l'element d'Apify és un vídeo/reel."""
+    """
+    Verifica si l'element d'Apify és un VÍDEO/REEL descarregable.
+
+    IMPORTANT: productType 'feed' NO vol dir vídeo: és com Instagram etiqueta els posts
+    normals (imatges i carrusels). Acceptar-lo feia entrar a la cua posts sense vídeo,
+    que yt-dlp rebutja amb "There is no video in this post".
+    """
+    item_type = str(item.get("type") or "").lower()
+    product_type = str(item.get("productType") or "").lower()
+
+    # Reel de veritat
+    if product_type == "clips":
+        return True
+
+    # Imatges i carrusels (sense ser reel) fora
+    if item_type in ("image", "sidecar", "carousel"):
+        return False
+
+    # Indicis explícits de vídeo
     if item.get("isVideo") or item.get("videoUrl"):
         return True
-    item_type = str(item.get("type") or "").lower()
-    if item_type in ["video", "reel"]:
-        return True
-    product_type = str(item.get("productType") or "").lower()
-    if product_type in ["clips", "feed"]:
+    if item_type in ("video", "reel"):
         return True
     if item.get("videoViewCount") or item.get("videoPlayCount"):
         return True
@@ -154,20 +187,28 @@ def main():
         print(f"❌ Error durant la crida a Apify: {e}")
         return
 
+    blocked = load_blocked_shortcodes()
     candidates = []
+    skipped_not_video = 0
+    skipped_known = 0
     for i in items:
         if not is_valid_video(i):
+            skipped_not_video += 1
             continue
 
         item_id = str(i.get("id") or i.get("shortCode") or i.get("code") or "")
         shortcode = i.get("shortCode") or i.get("code") or item_id
 
-        # Comprovar si ja s'ha processat anteriorment
-        if item_id in processed_ids or shortcode in processed_ids:
+        # Ja publicat, o ja ha fallat anteriorment (post esborrat, sense vídeo...)
+        if (item_id in processed_ids or shortcode in processed_ids
+                or item_id in blocked or shortcode in blocked):
+            skipped_known += 1
             continue
 
         candidates.append(i)
 
+    print(f"🚫 Descartats {skipped_not_video} posts que no són vídeo (imatges/carrusels) i "
+          f"{skipped_known} ja publicats o fallats.")
     print(f"📊 S'han trobat {len(candidates)} Reels candidats nous (no processats anteriorment).")
 
     if not candidates:
