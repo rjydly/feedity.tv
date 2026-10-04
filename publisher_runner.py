@@ -2,6 +2,7 @@ import os
 import re
 import csv
 import json
+import time
 import subprocess
 
 TODAY_QUEUE_FILE = 'today_queue.json'
@@ -9,7 +10,19 @@ BACKUP_CSV = 'backup_reels.csv'
 SOURCES_CSV = 'sources.csv'
 DB_FILE = 'processed_videos.json'
 
-MAX_RETRIES = 5  # Nombre màxim d'intents consecutius si un enllaç falla
+MAX_RETRIES = 5  # Nombre màxim d'intents REALS (execucions de main.py) si un enllaç falla
+MAX_PRECHECK_SKIPS = 25  # Màxim de candidats morts que es descarten per execució (no gasten intents)
+PRECHECK_SLEEP_S = 1.5   # Pausa entre comprovacions per no estressar Instagram
+
+# Errors de yt-dlp que indiquen que el Reel NO és publicable (permanents)
+PERMANENT_ERROR_MARKERS = (
+    "there is no video in this post",   # post d'imatge/carrusel sense vídeo
+    "empty media response",             # post esborrat / no accessible
+    "does not exist",
+    "has been removed",
+    "has been deleted",
+    "video unavailable",
+)
 
 
 def extract_shortcode(reel_url):
@@ -60,6 +73,73 @@ def save_backup_csv(rows):
         writer.writeheader()
         for r in rows:
             writer.writerow(r)
+
+
+def mark_backup_failed(reel_url):
+    """Marca com 'failed' a backup_reels.csv la fila d'aquest Reel (coincidència per shortcode)."""
+    code = extract_shortcode(reel_url)
+    rows = load_backup_csv()
+    changed = False
+    for r in rows:
+        if extract_shortcode(r.get('link', '').strip()) == code and r.get('status', '').strip() != 'failed':
+            r['status'] = 'failed'
+            changed = True
+    if changed:
+        save_backup_csv(rows)
+
+
+def precheck_reel(reel_url):
+    """
+    Comprovació ràpida (només metadades, sense descarregar) abans de gastar un intent complet.
+    Retorna:
+      'ok'        -> yt-dlp pot extreure el vídeo
+      'permanent' -> error permanent (post sense vídeo, esborrat...): descartar
+      'unknown'   -> error dubtós (xarxa, límit de peticions, login...) o yt-dlp no disponible:
+                     no es descarta; es deixa que main.py ho intenti com abans.
+    """
+    try:
+        import yt_dlp
+    except Exception:
+        return 'unknown'
+
+    opts = {'quiet': True, 'no_warnings': True, 'skip_download': True, 'noplaylist': True}
+    cookies_file = os.getenv("INSTAGRAM_COOKIES_FILE")
+    if cookies_file and os.path.exists(cookies_file):
+        opts['cookiefile'] = cookies_file
+
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.extract_info(reel_url, download=False)
+        return 'ok'
+    except Exception as e:
+        msg = str(e).strip().splitlines()[0] if str(e).strip() else repr(e)
+        if any(marker in str(e).lower() for marker in PERMANENT_ERROR_MARKERS):
+            print(f"🗑️ Descartat (error permanent): {reel_url} -> {msg[:140]}")
+            return 'permanent'
+        print(f"❓ Comprovació no concloent per a {reel_url}: {msg[:140]}")
+        return 'unknown'
+
+
+def get_next_valid_reel_url():
+    """
+    Tria el següent Reel i el comprova abans de retornar-lo. Els candidats morts es marquen
+    'failed' i se salten SENSE gastar intents de MAX_RETRIES (només cal un parell de segons).
+    """
+    skips = 0
+    while skips < MAX_PRECHECK_SKIPS:
+        url = get_next_reel_url()
+        if not url:
+            return None
+        verdict = precheck_reel(url)
+        if verdict != 'permanent':
+            return url
+        mark_backup_failed(url)
+        skips += 1
+        print(f"⏭️ Candidat descartat ({skips}/{MAX_PRECHECK_SKIPS}). Buscant el següent...")
+        time.sleep(PRECHECK_SLEEP_S)
+    print(f"⚠️ S'han descartat {MAX_PRECHECK_SKIPS} candidats morts seguits en aquesta execució. "
+          "Si passa sempre, revisa les cookies d'Instagram (INSTAGRAM_COOKIES).")
+    return None
 
 
 def get_next_reel_url():
@@ -145,7 +225,7 @@ def main():
     print(f"🚀 Iniciant pipeline de publicació (fins a {MAX_RETRIES} intents si hi ha fallades)...")
 
     for attempt in range(1, MAX_RETRIES + 1):
-        reel_url = get_next_reel_url()
+        reel_url = get_next_valid_reel_url()
         if not reel_url:
             print("❌ No queden més vídeos disponibles a la cua ni al backup.")
             return
