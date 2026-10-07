@@ -20,7 +20,7 @@ from moviepy import VideoFileClip, CompositeVideoClip, ImageClip, concatenate_vi
 # CONFIGURACIÓ PRINCIPAL
 # ==========================================
 
-TEST_MODE = True
+TEST_MODE = False
 
 # Secrets i credencials
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -304,7 +304,8 @@ def publish_to_bundle_snapchat(video_path, thumbnail_title, short_hook, tracking
         print(f"❌ Error connectant amb upload de Bundle.social: {e}")
         return False
 
-    clean_hook = (short_hook or thumbnail_title or "").replace("**", "").replace("\n", " ").strip()
+    # Netejar per a Snapchat (sense punt final i amb l'ID adjuntat)
+    clean_hook = re.sub(r'[\.\s]+$', '', (short_hook or thumbnail_title or "").replace("**", "").replace("\n", " ")).strip()
     id_tag = f"#{tracking_id}"
     max_text_len = 160 - len(id_tag) - 2
 
@@ -463,13 +464,13 @@ def publish_to_buffer(caption_text, fb_video_filename, shorts_video_filename, th
     for channel_id in channel_list:
         service = get_channel_service(channel_id, headers)
 
-        # Facebook rep la versió llarga; Instagram i TikTok reben la versió Shorts
+        # Facebook rep la versió amb text llarg; Instagram i TikTok reben la versió Shorts
         if "facebook" in service:
             chosen_video_file = fb_video_filename
-            print(f"📘 Canal Facebook detectat ({channel_id}): enviant versió amb text llarg ({chosen_video_file})")
+            print(f"📘 Canal Facebook detectat ({channel_id}): enviant versió llarga ({chosen_video_file})")
         else:
             chosen_video_file = shorts_video_filename
-            print(f"📱 Canal Shorts detectat ({service.upper() or 'IG/TIKTOK'} - {channel_id}): enviant versió amb text gran ({chosen_video_file})")
+            print(f"📱 Canal Shorts detectat ({service.upper() or 'IG/TIKTOK'} - {channel_id}): enviant versió Shorts ({chosen_video_file})")
 
         public_video_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{VIDEOS_DIR}/{chosen_video_file}"
 
@@ -625,7 +626,13 @@ def tokenize_markdown_text(text):
             else:
                 regular_words = part.split()
                 for w in regular_words:
-                    tokens.append((w, False))
+                    # Si el token és només un signe de puntuació aïllat i ja tenim paraula prèvia,
+                    # l'enganxem a la paraula anterior en lloc de posar-li un espai davant
+                    if w in (".", ",", "!", "?", ";", ":") and tokens:
+                        last_w, last_bold = tokens[-1]
+                        tokens[-1] = (last_w + w, last_bold)
+                    else:
+                        tokens.append((w, False))
         tokenized_paragraphs.append(tokens)
 
     return tokenized_paragraphs
@@ -736,7 +743,7 @@ def create_facebook_header_image(facebook_text, width=1080):
         cursor_x = margin_x
         for word, is_bold, word_w in line:
             f = body_font_bold if is_bold else body_font_regular
-            # Paraula en negreta destacada en groc #e3b100
+            # Paraules en negreta destacades en groc #e3b100
             color = COLOR_YELLOW if is_bold else COLOR_WHITE
             draw.text((cursor_x, text_y), word, font=f, fill=color)
             cursor_x += word_w + space_w
@@ -750,6 +757,9 @@ def create_facebook_header_image(facebook_text, width=1080):
 # CAPÇALERA 2: SHORTS (Logo a sobre i text curt en gran)
 # -------------------------------------------------------------
 def create_shorts_header_image(short_hook, width=1080):
+    # Netejar per evitar punts finals al format Shorts
+    short_hook = re.sub(r'[\.\s]+$', '', (short_hook or "").strip()).strip()
+
     margin_x = 80
     max_text_width = width - (margin_x * 2)
 
@@ -800,14 +810,14 @@ def create_shorts_header_image(short_hook, width=1080):
     text_y = logo_y + logo_size + gap_logo_text
     space_w = dummy_draw.textbbox((0, 0), " ", font=body_font_regular)[2]
 
-    # Dibuixem cada línia centrada
+    # Dibuixem cada línia centrada horitzontalment
     for line in wrapped_lines:
         line_w = sum(w for _, _, w in line) + (len(line) - 1) * space_w
         cursor_x = (width - line_w) // 2
 
         for word, is_bold, word_w in line:
             f = body_font_bold if is_bold else body_font_regular
-            # Paraula destacada en groc #e3b100
+            # Paraules en negreta destacades en groc #e3b100
             color = COLOR_YELLOW if is_bold else COLOR_WHITE
             draw.text((cursor_x, text_y), word, font=f, fill=color)
             cursor_x += word_w + space_w
@@ -843,6 +853,7 @@ RULES FOR SHORT HOOK ('short_hook') [FOR IG/TIKTOK/SNAPCHAT]:
 - Ultra-short, high-impact punchy hook in ENGLISH in strictly 1 OR 2 LINES (6 to 12 words total).
 - Designed for fast-scrolling vertical viewers.
 - STRICTLY NO EMOJIS OR UNICODE SYMBOLS.
+- DO NOT end with a period (.). No trailing punctuation at the end.
 - EMPHASIZE 1-3 key punchline words using markdown asterisks **like this**.
 
 RULES FOR THUMBNAIL TITLE ('thumbnail_title'):
@@ -861,7 +872,7 @@ Return strictly a JSON object with this format:
 {{
   "credits": "@original_creator_or_empty",
   "facebook_text": "First line hook\\n\\nSecond line with **bold words**.",
-  "short_hook": "When you try your **hardest** and still **fail**.",
+  "short_hook": "When you try your **hardest** and still **fail**",
   "thumbnail_title": "PUNCHY HEADLINE HERE",
   "generated_caption": "Detailed story directly about this video...\\n\\nCTA\\n\\n#hashtags\\n\\nCredit: @original_author"
 }}
@@ -940,7 +951,8 @@ def analyze_with_gemini_vision(image_pil, caption_raw="", tracking_id=""):
             data = parse_json_safely(res.text)
             if data:
                 fb_text = clean_text_symbols(data.get("facebook_text") or data.get("tweet_text", ""))
-                short_hook = clean_text_symbols(data.get("short_hook") or fb_text.split("\n")[0])
+                raw_short = data.get("short_hook") or fb_text.split("\n")[0]
+                short_hook = re.sub(r'[\.\s]+$', '', clean_text_symbols(raw_short)).strip()
                 if fb_text:
                     return (
                         data.get("credits", ""),
@@ -1002,7 +1014,8 @@ def analyze_with_groq_vision(image_pil, caption_raw="", tracking_id=""):
 
             if data:
                 fb_text = clean_text_symbols(data.get("facebook_text") or data.get("tweet_text", ""))
-                short_hook = clean_text_symbols(data.get("short_hook") or fb_text.split("\n")[0])
+                raw_short = data.get("short_hook") or fb_text.split("\n")[0]
+                short_hook = re.sub(r'[\.\s]+$', '', clean_text_symbols(raw_short)).strip()
                 if fb_text:
                     return (
                         data.get("credits", ""),
@@ -1639,7 +1652,7 @@ def main():
         generated_caption = reel_data["generated_caption"]
         thumbnail_title = reel_data["thumbnail_title"]
 
-        # Rutes dels dos fitxers de vídeo
+        # Rutes dels dos fitxers de vídeo generats
         unique_video_fb_rel = f"video_{video_id}_fb.mp4"
         unique_video_fb_path = os.path.join(VIDEOS_DIR, unique_video_fb_rel)
 
@@ -1666,7 +1679,7 @@ def main():
         save_processed_id(video_id, shortcode=shortcode)
         update_csv_status(reel_url, "done")
 
-        # 4. Sincronitzar amb GitHub
+        # 4. Sincronitzar fitxers amb GitHub
         push_media_to_github([unique_video_fb_rel, unique_video_shorts_rel, thumbnail_rel])
 
         snapchat_ok = False
