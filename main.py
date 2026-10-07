@@ -58,6 +58,29 @@ DISCLAIMER_TEXT = "All rights belong to the respective owner. DM for credit or r
 
 
 # ==========================================
+# INICIALITZACIÓ SEGURA DE FITXERS
+# ==========================================
+
+def init_tracking_files():
+    """Garanteix que els fitxers de tracking existeixen a disc abans de cap git add."""
+    # 1. snapchat_tracker.json
+    if not os.path.exists(SNAPCHAT_TRACKER_FILE):
+        now_month = datetime.now(timezone.utc).strftime("%Y-%m")
+        with open(SNAPCHAT_TRACKER_FILE, "w", encoding="utf-8") as f:
+            json.dump({"month": now_month, "count": 0, "last_post_date": ""}, f, indent=4)
+
+    # 2. published_posts.csv
+    if not os.path.exists(PUBLISHED_TRACKING_CSV):
+        fieldnames = [
+            "id", "shortcode", "source_url", "source_account",
+            "initial_likes", "thumbnail_title", "published_date", "snapchat_published"
+        ]
+        with open(PUBLISHED_TRACKING_CSV, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+
+
+# ==========================================
 # GESTIÓ D'HISTORIAL I CSVs
 # ==========================================
 
@@ -142,16 +165,10 @@ def record_published_post_tracking(tracking_id, shortcode, source_url, source_ac
     if TEST_MODE:
         return
 
-    file_exists = os.path.exists(PUBLISHED_TRACKING_CSV)
+    init_tracking_files()
     fieldnames = [
-        "id",
-        "shortcode",
-        "source_url",
-        "source_account",
-        "initial_likes",
-        "thumbnail_title",
-        "published_date",
-        "snapchat_published"
+        "id", "shortcode", "source_url", "source_account",
+        "initial_likes", "thumbnail_title", "published_date", "snapchat_published"
     ]
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     row = {
@@ -167,8 +184,6 @@ def record_published_post_tracking(tracking_id, shortcode, source_url, source_ac
 
     with open(PUBLISHED_TRACKING_CSV, mode="a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
-        if not file_exists:
-            writer.writeheader()
         writer.writerow(row)
     print(f"📊 Registre guardat a {PUBLISHED_TRACKING_CSV} per al ID {tracking_id}")
 
@@ -205,17 +220,9 @@ def get_reel_likes_count(target_url):
 
 
 def load_snapchat_tracker():
+    init_tracking_files()
     now = datetime.now(timezone.utc)
     current_month = now.strftime("%Y-%m")
-
-    default_data = {
-        "month": current_month,
-        "count": 0,
-        "last_post_date": ""
-    }
-
-    if not os.path.exists(SNAPCHAT_TRACKER_FILE):
-        return default_data
 
     try:
         with open(SNAPCHAT_TRACKER_FILE, "r", encoding="utf-8") as f:
@@ -225,7 +232,7 @@ def load_snapchat_tracker():
                 data["count"] = 0
             return data
     except Exception:
-        return default_data
+        return {"month": current_month, "count": 0, "last_post_date": ""}
 
 
 def save_snapchat_tracker(tracker_data):
@@ -304,7 +311,6 @@ def publish_to_bundle_snapchat(video_path, thumbnail_title, short_hook, tracking
         print(f"❌ Error connectant amb upload de Bundle.social: {e}")
         return False
 
-    # Netejar per a Snapchat (sense punt final i amb l'ID adjuntat)
     clean_hook = re.sub(r'[\.\s]+$', '', (short_hook or thumbnail_title or "").replace("**", "").replace("\n", " ")).strip()
     id_tag = f"#{tracking_id}"
     max_text_len = 160 - len(id_tag) - 2
@@ -370,6 +376,10 @@ def cleanup_videos_dir(keep_filenames=None):
 
 
 def push_media_to_github(keep_filenames):
+    """
+    Sincronitza els nous vídeos i fitxers a GitHub.
+    Comprova que només es facin 'git add' de fitxers existents per evitar errors fatals.
+    """
     if TEST_MODE:
         return True
 
@@ -377,10 +387,8 @@ def push_media_to_github(keep_filenames):
     try:
         cleanup_videos_dir(keep_filenames=keep_filenames)
 
-        subprocess.run(["git", "pull", "--rebase", "origin", "main"], check=False)
-
-        subprocess.run([
-            "git", "add", "-A",
+        # 1. Candidats a afegir: només els que realment existeixin a disc
+        candidates = [
             VIDEOS_DIR,
             "processed_videos.json",
             "sources.csv",
@@ -388,12 +396,41 @@ def push_media_to_github(keep_filenames):
             "backup_reels.csv",
             SNAPCHAT_TRACKER_FILE,
             PUBLISHED_TRACKING_CSV
-        ], check=False)
+        ]
+        existing_targets = [c for c in candidates if os.path.exists(c)]
 
-        subprocess.run(["git", "commit", "-m", "Publish dual videos & update tracking [skip ci]"], check=False)
-        subprocess.run(["git", "push"], check=True)
+        if not existing_targets:
+            print("⚠️ No hi ha cap fitxer existent per afegir a Git.")
+            return True
+
+        # 2. Afegir els fitxers a Git de forma segura
+        cmd_add = ["git", "add", "-A"] + existing_targets
+        add_res = subprocess.run(cmd_add, capture_output=True, text=True)
+        if add_res.returncode != 0:
+            print(f"⚠️ Error a git add: {add_res.stderr}")
+            return False
+
+        # 3. Commitejar els canvis locals (si n'hi ha)
+        status_res = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True)
+        if status_res.stdout.strip():
+            commit_res = subprocess.run(
+                ["git", "commit", "-m", "Publish dual videos & update tracking [skip ci]"],
+                capture_output=True, text=True
+            )
+            if commit_res.returncode != 0:
+                print(f"⚠️ Error a git commit: {commit_res.stderr}")
+
+        # 4. Fer pull --rebase DESPRÉS de commitejar (evita l'error d'unstaged changes)
+        subprocess.run(["git", "pull", "--rebase", "origin", "main"], check=False)
+
+        # 5. Push definitiu cap a GitHub
+        push_res = subprocess.run(["git", "push", "origin", "main"], capture_output=True, text=True)
+        if push_res.returncode != 0:
+            print(f"⚠️ Error a git push: {push_res.stderr}")
+            return False
+
         print("✅ Estat i vídeos sincronitzats a GitHub amb èxit!")
-        time.sleep(3)
+        time.sleep(4)
         return True
     except Exception as e:
         print(f"⚠️ Error fent push a GitHub: {e}")
@@ -464,7 +501,6 @@ def publish_to_buffer(caption_text, fb_video_filename, shorts_video_filename, th
     for channel_id in channel_list:
         service = get_channel_service(channel_id, headers)
 
-        # Facebook rep la versió amb text llarg; Instagram i TikTok reben la versió Shorts
         if "facebook" in service:
             chosen_video_file = fb_video_filename
             print(f"📘 Canal Facebook detectat ({channel_id}): enviant versió llarga ({chosen_video_file})")
@@ -626,8 +662,7 @@ def tokenize_markdown_text(text):
             else:
                 regular_words = part.split()
                 for w in regular_words:
-                    # Si el token és només un signe de puntuació aïllat i ja tenim paraula prèvia,
-                    # l'enganxem a la paraula anterior en lloc de posar-li un espai davant
+                    # Enganxa signes de puntuació orfes al mot anterior
                     if w in (".", ",", "!", "?", ";", ":") and tokens:
                         last_w, last_bold = tokens[-1]
                         tokens[-1] = (last_w + w, last_bold)
@@ -743,7 +778,6 @@ def create_facebook_header_image(facebook_text, width=1080):
         cursor_x = margin_x
         for word, is_bold, word_w in line:
             f = body_font_bold if is_bold else body_font_regular
-            # Paraules en negreta destacades en groc #e3b100
             color = COLOR_YELLOW if is_bold else COLOR_WHITE
             draw.text((cursor_x, text_y), word, font=f, fill=color)
             cursor_x += word_w + space_w
@@ -757,7 +791,7 @@ def create_facebook_header_image(facebook_text, width=1080):
 # CAPÇALERA 2: SHORTS (Logo a sobre i text curt en gran)
 # -------------------------------------------------------------
 def create_shorts_header_image(short_hook, width=1080):
-    # Netejar per evitar punts finals al format Shorts
+    # Netejar qualsevol punt final o espais sobrants
     short_hook = re.sub(r'[\.\s]+$', '', (short_hook or "").strip()).strip()
 
     margin_x = 80
@@ -772,7 +806,7 @@ def create_shorts_header_image(short_hook, width=1080):
     tokenized = tokenize_markdown_text(short_hook)
     wrapped_lines = wrap_tokenized_text(tokenized, body_font_regular, body_font_bold, max_text_width, dummy_draw)
 
-    # Limitem estrictament a màxim 2 línies per a Shorts
+    # Limitem estrictament a 1 o 2 línies per a Shorts
     wrapped_lines = [l for l in wrapped_lines if l][:2]
 
     line_height = 72
@@ -787,7 +821,6 @@ def create_shorts_header_image(short_hook, width=1080):
     img = Image.new("RGBA", (width, header_height), (0, 0, 0, 255))
     draw = ImageDraw.Draw(img)
 
-    # Logo centrat a sobre del text
     logo_x = (width - logo_size) // 2
     logo_y = top_padding
 
@@ -810,14 +843,12 @@ def create_shorts_header_image(short_hook, width=1080):
     text_y = logo_y + logo_size + gap_logo_text
     space_w = dummy_draw.textbbox((0, 0), " ", font=body_font_regular)[2]
 
-    # Dibuixem cada línia centrada horitzontalment
     for line in wrapped_lines:
         line_w = sum(w for _, _, w in line) + (len(line) - 1) * space_w
         cursor_x = (width - line_w) // 2
 
         for word, is_bold, word_w in line:
             f = body_font_bold if is_bold else body_font_regular
-            # Paraules en negreta destacades en groc #e3b100
             color = COLOR_YELLOW if is_bold else COLOR_WHITE
             draw.text((cursor_x, text_y), word, font=f, fill=color)
             cursor_x += word_w + space_w
@@ -1390,10 +1421,6 @@ def create_editorial_thumbnail(video_path, thumbnail_title, output_path=os.path.
 # ==========================================
 
 def process_dual_video_canvases(input_path, fb_text, short_hook, thumbnail_img_np, output_fb_path, output_shorts_path):
-    """
-    Optimitza el renderitzat processant el crop del vídeo un sol cop i
-    exportant les dues variants: Facebook (llarg) i Shorts (curt en gran).
-    """
     os.makedirs(VIDEOS_DIR, exist_ok=True)
     clip = VideoFileClip(input_path)
     crop_box = compute_safe_crop(clip)
@@ -1407,7 +1434,7 @@ def process_dual_video_canvases(input_path, fb_text, short_hook, thumbnail_img_n
     scaled_clip = cropped_clip.resized(width=1080)
     cover_clip = ImageClip(thumbnail_img_np).with_duration(1.0 / 30.0)
 
-    # 1. GENERAR VÍDEO FACEBOOK (Capçalera Tweet clàssica)
+    # 1. VÍDEO FACEBOOK (Capçalera Tweet clàssica)
     print("🎨 [1/2] Renderitzant composició per a Facebook...")
     header_fb_np = create_facebook_header_image(fb_text, width=1080)
     header_fb_h = header_fb_np.shape[0]
@@ -1429,7 +1456,7 @@ def process_dual_video_canvases(input_path, fb_text, short_hook, thumbnail_img_n
     composite_fb.close()
     final_fb_video.close()
 
-    # 2. GENERAR VÍDEO SHORTS (Instagram / TikTok / Snapchat)
+    # 2. VÍDEO SHORTS (Instagram / TikTok / Snapchat)
     print("🎨 [2/2] Renderitzant composició per a Shorts (IG/TikTok/Snapchat)...")
     header_shorts_np = create_shorts_header_image(short_hook, width=1080)
     header_shorts_h = header_shorts_np.shape[0]
@@ -1474,7 +1501,6 @@ def send_telegram_notification(video_fb_path, video_shorts_path, thumbnail_path,
     if TEST_MODE:
         print("🧪 [Mode Proves] Enviant tots dos vídeos, portada i caption per Telegram...")
 
-        # Vídeo 1: Versió Facebook
         caption_v1 = (
             f"🎬 <b>[TEST MODE] 1/2 VERSIÓ FACEBOOK (Text Llarg)</b>\n\n"
             f"📌 <b>Text</b>:\n<i>{safe_fb_text}</i>\n\n"
@@ -1485,7 +1511,6 @@ def send_telegram_notification(video_fb_path, video_shorts_path, thumbnail_path,
         with open(video_fb_path, "rb") as vf1:
             requests.post(url_video, data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption_v1, "parse_mode": "HTML"}, files={"video": vf1})
 
-        # Vídeo 2: Versió Shorts (IG / TikTok / Snapchat)
         caption_v2 = (
             f"🎬 <b>[TEST MODE] 2/2 VERSIÓ SHORTS (IG / TikTok / Snapchat)</b>\n\n"
             f"📌 <b>Hook Gran</b>:\n<i>{safe_short_hook}</i>\n\n"
@@ -1494,13 +1519,11 @@ def send_telegram_notification(video_fb_path, video_shorts_path, thumbnail_path,
         with open(video_shorts_path, "rb") as vf2:
             requests.post(url_video, data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption_v2, "parse_mode": "HTML"}, files={"video": vf2})
 
-        # Portada
         if thumbnail_path and os.path.exists(thumbnail_path):
             url_photo = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
             with open(thumbnail_path, "rb") as photo_file:
                 requests.post(url_photo, data={"chat_id": TELEGRAM_CHAT_ID, "caption": "🖼️ <b>[TEST MODE] Portada generada</b>", "parse_mode": "HTML"}, files={"photo": photo_file})
 
-        # Caption complet amb l'ID
         url_msg = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         caption_text = f"📝 <b>[TEST MODE] CAPTION AMB ID</b>:\n\n<code>{html.escape(generated_caption)}</code>"
         requests.post(url_msg, data={"chat_id": TELEGRAM_CHAT_ID, "text": caption_text, "parse_mode": "HTML"})
@@ -1568,7 +1591,6 @@ def get_reel_by_url(reel_url):
 
     caption_raw = info.get("description") or ""
 
-    # Dades per al tracking CSV
     uploader = info.get("uploader") or info.get("channel") or info.get("uploader_id") or ""
     source_account = f"@{uploader}" if uploader else "Desconegut"
     initial_likes = get_reel_likes_count(reel_url) or info.get("like_count") or 0
@@ -1612,6 +1634,8 @@ def main():
         print("❌ No s'ha trobat el fitxer sources.csv")
         return
 
+    # Garanteix que els fitxers de persistència existeixen sempre abans de cap git add
+    init_tracking_files()
     os.makedirs(VIDEOS_DIR, exist_ok=True)
 
     pending_urls = []
@@ -1652,7 +1676,6 @@ def main():
         generated_caption = reel_data["generated_caption"]
         thumbnail_title = reel_data["thumbnail_title"]
 
-        # Rutes dels dos fitxers de vídeo generats
         unique_video_fb_rel = f"video_{video_id}_fb.mp4"
         unique_video_fb_path = os.path.join(VIDEOS_DIR, unique_video_fb_rel)
 
@@ -1665,7 +1688,7 @@ def main():
         # 1. Generar la miniatura editorial
         thumbnail_np, thumbnail_file = create_editorial_thumbnail(video_file, thumbnail_title, thumbnail_path)
 
-        # 2. Generar els dos vídeos (.mp4 de Facebook i .mp4 de Shorts)
+        # 2. Generar els dos vídeos
         process_dual_video_canvases(
             video_file,
             fb_text,
@@ -1675,17 +1698,20 @@ def main():
             unique_video_shorts_path
         )
 
-        # 3. Guardar IDs i estats en local ABANS de fer el push a GitHub
+        # 3. Guardar IDs i estats en local
         save_processed_id(video_id, shortcode=shortcode)
         update_csv_status(reel_url, "done")
 
-        # 4. Sincronitzar fitxers amb GitHub
-        push_media_to_github([unique_video_fb_rel, unique_video_shorts_rel, thumbnail_rel])
+        # 4. Sincronitzar fitxers amb GitHub ABANS de Buffer
+        push_ok = push_media_to_github([unique_video_fb_rel, unique_video_shorts_rel, thumbnail_rel])
+        if not push_ok and not TEST_MODE:
+            print("❌ El push a GitHub ha fallat. S'atura la publicació a Buffer per evitar URLs 404.")
+            update_csv_status(reel_url, "failed")
+            continue
 
         snapchat_ok = False
         # 5. Publicació multicanal
         if not TEST_MODE:
-            # Publicació a Buffer (Facebook rep video_fb, Instagram i TikTok reben video_shorts)
             publish_to_buffer(
                 generated_caption,
                 fb_video_filename=unique_video_fb_rel,
@@ -1693,7 +1719,6 @@ def main():
                 thumbnail_offset_ms=0
             )
 
-            # Publicació selectiva a Snapchat Spotlight (TOP 20 del mes) amb video_shorts
             if should_publish_to_snapchat(reel_url, unique_video_shorts_path):
                 snapchat_ok = publish_to_bundle_snapchat(
                     unique_video_shorts_path,
@@ -1704,7 +1729,6 @@ def main():
                 if snapchat_ok:
                     record_snapchat_publication()
 
-            # Guardar el registre al CSV de tracking
             record_published_post_tracking(
                 tracking_id=tracking_id,
                 shortcode=shortcode,
@@ -1715,9 +1739,9 @@ def main():
                 snapchat_published=snapchat_ok
             )
         else:
-            print("🧪 [Mode Proves Actiu]: S'omet la publicació externa i el tracking CSV.")
+            print("🧪 [Mode Proves Actiu]: S'omet la publicació externa.")
 
-        # 6. Notificació per Telegram segons el mode
+        # 6. Notificació per Telegram
         send_telegram_notification(
             unique_video_fb_path,
             unique_video_shorts_path,
