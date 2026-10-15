@@ -1508,13 +1508,24 @@ def process_dual_video_canvases(input_path, fb_text, short_hook, thumbnail_img_n
     scaled_clip = cropped_clip.resized(width=1080)
     cover_clip = ImageClip(thumbnail_img_np).with_duration(1.0 / 30.0)
 
-    # 1. VÍDEO FACEBOOK (Capçalera Tweet clàssica)
+    # =========================================================
+    # 1. VÍDEO FACEBOOK (Límit màxim: 1 min 25 s = 85 segons)
+    # =========================================================
     print("🎨 [1/2] Renderitzant composició per a Facebook...")
+    FB_MAX_DURATION = 85.0  # 1m 25s de marge de seguretat per a Facebook Reels
+
+    if scaled_clip.duration and scaled_clip.duration > FB_MAX_DURATION:
+        print(f"✂️ Retallant versió Facebook a {FB_MAX_DURATION}s (durada original: {scaled_clip.duration:.1f}s)...")
+        scaled_clip_fb = scaled_clip.subclipped(0, FB_MAX_DURATION)
+    else:
+        scaled_clip_fb = scaled_clip
+
     header_fb_np = create_facebook_header_image(fb_text, width=1080)
     header_fb_h = header_fb_np.shape[0]
 
-    header_fb_clip = ImageClip(header_fb_np).with_duration(scaled_clip.duration).with_position(("center", 180))
-    video_fb_pos = scaled_clip.with_position(("center", 180 + header_fb_h + 10))
+    # La capçalera s'ajusta exactament a la durada (retallada) del vídeo de Facebook
+    header_fb_clip = ImageClip(header_fb_np).with_duration(scaled_clip_fb.duration).with_position(("center", 180))
+    video_fb_pos = scaled_clip_fb.with_position(("center", 180 + header_fb_h + 10))
     composite_fb = CompositeVideoClip([video_fb_pos, header_fb_clip], size=(1080, 1920))
     final_fb_video = concatenate_videoclips([cover_clip, composite_fb])
 
@@ -1529,8 +1540,12 @@ def process_dual_video_canvases(input_path, fb_text, short_hook, thumbnail_img_n
     header_fb_clip.close()
     composite_fb.close()
     final_fb_video.close()
+    if scaled_clip_fb != scaled_clip:
+        scaled_clip_fb.close()
 
-    # 2. VÍDEO SHORTS (Instagram / TikTok / Snapchat / YouTube Shorts)
+    # =========================================================
+    # 2. VÍDEO SHORTS (Instagram / TikTok / Snapchat / YouTube)
+    # =========================================================
     print("🎨 [2/2] Renderitzant composició per a Shorts (IG/TikTok/Snap/YouTube)...")
     header_shorts_np = create_shorts_header_image(short_hook, width=1080)
     header_shorts_h = header_shorts_np.shape[0]
@@ -1556,7 +1571,6 @@ def process_dual_video_canvases(input_path, fb_text, short_hook, thumbnail_img_n
     scaled_clip.close()
     cropped_clip.close()
     clip.close()
-
 
 # ==========================================
 # NOTIFICACIÓ TELEGRAM
