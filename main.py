@@ -32,6 +32,10 @@ BUFFER_ACCESS_TOKEN = os.getenv("BUFFER_ACCESS_TOKEN")
 BUFFER_CHANNEL_IDS = os.getenv("BUFFER_CHANNEL_IDS")
 GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY")
 
+# Zernio API (YouTube Shorts)
+ZERNIO_API_KEY = os.getenv("ZERNIO_API_KEY")
+ZERNIO_YT_ACCOUNT_ID = os.getenv("ZERNIO_YT_ACCOUNT_ID")
+
 # Bundle.social (Snapchat Spotlight)
 BUNDLE_SOCIAL_API_KEY = os.getenv("BUNDLE_SOCIAL_API_KEY")
 BUNDLE_TEAM_ID = os.getenv("BUNDLE_TEAM_ID")
@@ -73,7 +77,8 @@ def init_tracking_files():
     if not os.path.exists(PUBLISHED_TRACKING_CSV):
         fieldnames = [
             "id", "shortcode", "source_url", "source_account",
-            "initial_likes", "thumbnail_title", "published_date", "snapchat_published"
+            "initial_likes", "thumbnail_title", "published_date",
+            "snapchat_published", "youtube_published"
         ]
         with open(PUBLISHED_TRACKING_CSV, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -160,7 +165,7 @@ def update_csv_status(target_url, new_status="done"):
             print(f"📝 backup_reels.csv actualitzat: {target_url} -> {new_status}")
 
 
-def record_published_post_tracking(tracking_id, shortcode, source_url, source_account, initial_likes, thumbnail_title, snapchat_published=False):
+def record_published_post_tracking(tracking_id, shortcode, source_url, source_account, initial_likes, thumbnail_title, snapchat_published=False, youtube_published=False):
     """Guarda l'ID i les mètriques d'origen a published_posts.csv per a traçabilitat."""
     if TEST_MODE:
         return
@@ -168,7 +173,8 @@ def record_published_post_tracking(tracking_id, shortcode, source_url, source_ac
     init_tracking_files()
     fieldnames = [
         "id", "shortcode", "source_url", "source_account",
-        "initial_likes", "thumbnail_title", "published_date", "snapchat_published"
+        "initial_likes", "thumbnail_title", "published_date",
+        "snapchat_published", "youtube_published"
     ]
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     row = {
@@ -179,13 +185,87 @@ def record_published_post_tracking(tracking_id, shortcode, source_url, source_ac
         "initial_likes": initial_likes,
         "thumbnail_title": thumbnail_title,
         "published_date": now_iso,
-        "snapchat_published": "yes" if snapchat_published else "no"
+        "snapchat_published": "yes" if snapchat_published else "no",
+        "youtube_published": "yes" if youtube_published else "no"
     }
 
     with open(PUBLISHED_TRACKING_CSV, mode="a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writerow(row)
     print(f"📊 Registre guardat a {PUBLISHED_TRACKING_CSV} per al ID {tracking_id}")
+
+
+# ==========================================
+# PUBLICACIÓ YOUTUBE SHORTS (ZERNIO API)
+# ==========================================
+
+def publish_to_zernio_youtube(caption_text, video_filename, short_hook, thumbnail_title):
+    """
+    Publica el vídeo vertical (Shorts) a YouTube mitjançant l'API de Zernio.
+    YouTube classifica el vídeo automàticament com a Short en ser 9:16 i < 3 min.
+    """
+    if not ZERNIO_API_KEY or not ZERNIO_YT_ACCOUNT_ID or not GITHUB_REPOSITORY:
+        print("⚠️ ZERNIO_API_KEY o ZERNIO_YT_ACCOUNT_ID no configurats. S'omet YouTube Shorts.")
+        return False
+
+    public_video_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{VIDEOS_DIR}/{video_filename}"
+
+    # Netejar el títol per a YouTube (màx 100 caràcters)
+    clean_title = (short_hook or thumbnail_title or "Viral Video").replace("**", "").replace("\n", " ").strip()
+    if len(clean_title) > 90:
+        clean_title = clean_title[:87].rstrip() + "..."
+    yt_title = f"{clean_title} #shorts"[:100]
+
+    headers = {
+        "Authorization": f"Bearer {ZERNIO_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "content": caption_text,
+        "mediaItems": [
+            {
+                "type": "video",
+                "url": public_video_url
+            }
+        ],
+        "platforms": [
+            {
+                "platform": "youtube",
+                "accountId": ZERNIO_YT_ACCOUNT_ID,
+                "platformSpecificData": {
+                    "title": yt_title,
+                    "visibility": "public",
+                    "madeForKids": False,
+                    "categoryId": "22"  # People & Blogs
+                }
+            }
+        ],
+        "publishNow": True
+    }
+
+    try:
+        print(f"🚀 [Zernio] Publicant a YouTube Shorts: '{yt_title}'...")
+        res = requests.post("https://zernio.com/api/v1/posts", headers=headers, json=payload, timeout=40)
+        data = res.json()
+
+        if res.status_code in (200, 201):
+            post_info = data.get("post", {})
+            platform_url = ""
+            for p in post_info.get("platforms", []):
+                if p.get("platform") == "youtube":
+                    platform_url = p.get("platformPostUrl") or ""
+            print(f"🎉 Publicat amb èxit a YouTube Shorts! URL: {platform_url or 'Processant'}")
+            return True
+        elif res.status_code == 207:
+            print(f"⚠️ Error parcial a YouTube (207): {data}")
+            return False
+        else:
+            print(f"❌ Error a Zernio API ({res.status_code}): {res.text}")
+            return False
+    except Exception as e:
+        print(f"❌ Error connectant amb Zernio per a YouTube: {e}")
+        return False
 
 
 # ==========================================
@@ -376,10 +456,6 @@ def cleanup_videos_dir(keep_filenames=None):
 
 
 def push_media_to_github(keep_filenames):
-    """
-    Sincronitza els nous vídeos i fitxers a GitHub.
-    Comprova que només es facin 'git add' de fitxers existents per evitar errors fatals.
-    """
     if TEST_MODE:
         return True
 
@@ -387,7 +463,6 @@ def push_media_to_github(keep_filenames):
     try:
         cleanup_videos_dir(keep_filenames=keep_filenames)
 
-        # 1. Candidats a afegir: només els que realment existeixin a disc
         candidates = [
             VIDEOS_DIR,
             "processed_videos.json",
@@ -400,17 +475,16 @@ def push_media_to_github(keep_filenames):
         existing_targets = [c for c in candidates if os.path.exists(c)]
 
         if not existing_targets:
-            print("⚠️ No hi ha cap fitxer existent per afegir a Git.")
             return True
 
-        # 2. Afegir els fitxers a Git de forma segura
+        # 1. git add només de fitxers existents
         cmd_add = ["git", "add", "-A"] + existing_targets
         add_res = subprocess.run(cmd_add, capture_output=True, text=True)
         if add_res.returncode != 0:
             print(f"⚠️ Error a git add: {add_res.stderr}")
             return False
 
-        # 3. Commitejar els canvis locals (si n'hi ha)
+        # 2. git commit abans del rebase per evitar 'unstaged changes'
         status_res = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True)
         if status_res.stdout.strip():
             commit_res = subprocess.run(
@@ -420,10 +494,10 @@ def push_media_to_github(keep_filenames):
             if commit_res.returncode != 0:
                 print(f"⚠️ Error a git commit: {commit_res.stderr}")
 
-        # 4. Fer pull --rebase DESPRÉS de commitejar (evita l'error d'unstaged changes)
+        # 3. git pull --rebase ara que no hi ha canvis pendents
         subprocess.run(["git", "pull", "--rebase", "origin", "main"], check=False)
 
-        # 5. Push definitiu cap a GitHub
+        # 4. git push
         push_res = subprocess.run(["git", "push", "origin", "main"], capture_output=True, text=True)
         if push_res.returncode != 0:
             print(f"⚠️ Error a git push: {push_res.stderr}")
@@ -662,7 +736,7 @@ def tokenize_markdown_text(text):
             else:
                 regular_words = part.split()
                 for w in regular_words:
-                    # Enganxa signes de puntuació orfes al mot anterior
+                    # Enganxa signes de puntuació aïllats al mot precedent per evitar espais orfes
                     if w in (".", ",", "!", "?", ";", ":") and tokens:
                         last_w, last_bold = tokens[-1]
                         tokens[-1] = (last_w + w, last_bold)
@@ -791,7 +865,7 @@ def create_facebook_header_image(facebook_text, width=1080):
 # CAPÇALERA 2: SHORTS (Logo a sobre i text curt en gran)
 # -------------------------------------------------------------
 def create_shorts_header_image(short_hook, width=1080):
-    # Netejar qualsevol punt final o espais sobrants
+    # Netejar per evitar punts finals
     short_hook = re.sub(r'[\.\s]+$', '', (short_hook or "").strip()).strip()
 
     margin_x = 80
@@ -880,7 +954,7 @@ RULES FOR FACEBOOK TEXT ('facebook_text'):
 - STRICTLY NO EMOJIS OR UNICODE SYMBOLS in 'facebook_text'.
 - EMPHASIZE 2-4 key punchline words using markdown asterisks **like this**.
 
-RULES FOR SHORT HOOK ('short_hook') [FOR IG/TIKTOK/SNAPCHAT]:
+RULES FOR SHORT HOOK ('short_hook') [FOR IG/TIKTOK/SNAPCHAT/YOUTUBE SHORTS]:
 - Ultra-short, high-impact punchy hook in ENGLISH in strictly 1 OR 2 LINES (6 to 12 words total).
 - Designed for fast-scrolling vertical viewers.
 - STRICTLY NO EMOJIS OR UNICODE SYMBOLS.
@@ -1456,8 +1530,8 @@ def process_dual_video_canvases(input_path, fb_text, short_hook, thumbnail_img_n
     composite_fb.close()
     final_fb_video.close()
 
-    # 2. VÍDEO SHORTS (Instagram / TikTok / Snapchat)
-    print("🎨 [2/2] Renderitzant composició per a Shorts (IG/TikTok/Snapchat)...")
+    # 2. VÍDEO SHORTS (Instagram / TikTok / Snapchat / YouTube Shorts)
+    print("🎨 [2/2] Renderitzant composició per a Shorts (IG/TikTok/Snap/YouTube)...")
     header_shorts_np = create_shorts_header_image(short_hook, width=1080)
     header_shorts_h = header_shorts_np.shape[0]
 
@@ -1512,7 +1586,7 @@ def send_telegram_notification(video_fb_path, video_shorts_path, thumbnail_path,
             requests.post(url_video, data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption_v1, "parse_mode": "HTML"}, files={"video": vf1})
 
         caption_v2 = (
-            f"🎬 <b>[TEST MODE] 2/2 VERSIÓ SHORTS (IG / TikTok / Snapchat)</b>\n\n"
+            f"🎬 <b>[TEST MODE] 2/2 VERSIÓ SHORTS (IG / TikTok / Snap / YouTube)</b>\n\n"
             f"📌 <b>Hook Gran</b>:\n<i>{safe_short_hook}</i>\n\n"
             f"🆔 <b>ID</b>: <code>{safe_tracking_id}</code>"
         )
@@ -1536,7 +1610,7 @@ def send_telegram_notification(video_fb_path, video_shorts_path, thumbnail_path,
             f"🆔 <b>ID:</b> <code>{safe_tracking_id}</code>\n"
             f"📌 <b>Hook Shorts:</b> {safe_short_hook}\n"
             f"📘 <b>Facebook:</b> Versió Text Llarg enviada\n"
-            f"📱 <b>IG / TikTok / Snap:</b> Versió Shorts enviada\n"
+            f"📱 <b>IG / TikTok / YouTube:</b> Versió Shorts enviada\n"
             f"👤 <b>Font:</b> {safe_credits}\n"
             f"🌐 <i>Estat a sources.csv: <b>done</b></i>"
         )
@@ -1634,7 +1708,6 @@ def main():
         print("❌ No s'ha trobat el fitxer sources.csv")
         return
 
-    # Garanteix que els fitxers de persistència existeixen sempre abans de cap git add
     init_tracking_files()
     os.makedirs(VIDEOS_DIR, exist_ok=True)
 
@@ -1702,16 +1775,19 @@ def main():
         save_processed_id(video_id, shortcode=shortcode)
         update_csv_status(reel_url, "done")
 
-        # 4. Sincronitzar fitxers amb GitHub ABANS de Buffer
+        # 4. Sincronitzar fitxers amb GitHub ABANS de publicar
         push_ok = push_media_to_github([unique_video_fb_rel, unique_video_shorts_rel, thumbnail_rel])
         if not push_ok and not TEST_MODE:
-            print("❌ El push a GitHub ha fallat. S'atura la publicació a Buffer per evitar URLs 404.")
+            print("❌ El push a GitHub ha fallat. S'atura la publicació per evitar URLs 404.")
             update_csv_status(reel_url, "failed")
             continue
 
         snapchat_ok = False
+        youtube_ok = False
+
         # 5. Publicació multicanal
         if not TEST_MODE:
+            # 5.1 Publicació a Buffer (Facebook rep video_fb; Instagram i TikTok reben video_shorts)
             publish_to_buffer(
                 generated_caption,
                 fb_video_filename=unique_video_fb_rel,
@@ -1719,6 +1795,15 @@ def main():
                 thumbnail_offset_ms=0
             )
 
+            # 5.2 Publicació a YouTube Shorts via Zernio API (amb video_shorts)
+            youtube_ok = publish_to_zernio_youtube(
+                caption_text=generated_caption,
+                video_filename=unique_video_shorts_rel,
+                short_hook=short_hook,
+                thumbnail_title=thumbnail_title
+            )
+
+            # 5.3 Publicació selectiva a Snapchat Spotlight (TOP 20 del mes)
             if should_publish_to_snapchat(reel_url, unique_video_shorts_path):
                 snapchat_ok = publish_to_bundle_snapchat(
                     unique_video_shorts_path,
@@ -1729,6 +1814,7 @@ def main():
                 if snapchat_ok:
                     record_snapchat_publication()
 
+            # Guardar el registre al CSV de tracking
             record_published_post_tracking(
                 tracking_id=tracking_id,
                 shortcode=shortcode,
@@ -1736,7 +1822,8 @@ def main():
                 source_account=source_account,
                 initial_likes=initial_likes,
                 thumbnail_title=thumbnail_title,
-                snapchat_published=snapchat_ok
+                snapchat_published=snapchat_ok,
+                youtube_published=youtube_ok
             )
         else:
             print("🧪 [Mode Proves Actiu]: S'omet la publicació externa.")
